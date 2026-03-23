@@ -1,6 +1,4 @@
-# LineExtractor Frontend (Pure Frontend)
-
-纯前端线稿提取工具，所有计算都在浏览器本地完成，无后端依赖。
+# LineExtractor Frontend
 
 ## 核心流程
 
