@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>频域线稿提取器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <h1>频域线稿提取器</h1>
+          <p>纯前端计算 | RGB 频域高通 + K 算法 + 分层缓存重算</p>
+        </div>
+
+        <div class="toolbar">
+          <label class="btn upload-btn">
+            导入图片
+            <input id="file-input" type="file" accept="image/*" />
+          </label>
+          <button id="load-demo" class="btn btn-secondary" type="button">加载 test.jpg</button>
+          <button id="export-png" class="btn btn-secondary" type="button">导出 PNG</button>
+          <button id="reset-params" class="btn btn-secondary" type="button">重置参数</button>
+
+          <label class="backend-pick" for="backend-select">
+            渲染后端
+            <select id="backend-select">
+              <option value="auto">Auto (WebGPU &gt; WebGL2 &gt; CPU)</option>
+              <option value="webgpu">WebGPU</option>
+              <option value="webgl">WebGL2</option>
+              <option value="cpu">CPU</option>
+            </select>
+          </label>
+        </div>
+      </header>
+
+      <section class="main-grid">
+        <aside id="controls" class="panel controls"></aside>
+
+        <section class="panel preview">
+          <div class="canvas-grid">
+            <figure>
+              <figcaption>原图</figcaption>
+              <canvas id="source-canvas"></canvas>
+            </figure>
+            <figure>
+              <figcaption>线稿输出</figcaption>
+              <canvas id="result-canvas"></canvas>
+            </figure>
+          </div>
+
+          <figure class="compare-figure">
+            <figcaption>前后对比滑动</figcaption>
+            <div id="compare-stage" class="compare-stage">
+              <canvas id="compare-source-canvas"></canvas>
+              <div id="compare-overlay" class="compare-overlay">
+                <canvas id="compare-result-canvas"></canvas>
+              </div>
+              <div id="compare-divider" class="compare-divider"></div>
+            </div>
+
+            <div class="compare-controls">
+              <label for="compare-slider">对比位置</label>
+              <input id="compare-slider" type="range" min="0" max="100" step="1" value="50" />
+              <span id="compare-value" class="value-badge">50%</span>
+            </div>
+          </figure>
+        </section>
+      </section>
+
+      <footer id="status" class="status">等待加载图片...</footer>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
