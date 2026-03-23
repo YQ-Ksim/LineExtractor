@@ -10,7 +10,7 @@ const vec2 POS[3] = vec2[](
 out vec2 vUv;
 void main() {
   vec2 pos = POS[gl_VertexID];
-  vUv = pos * 0.5 + 0.5;
+  vUv = vec2(pos.x * 0.5 + 0.5, 1.0 - (pos.y * 0.5 + 0.5));
   gl_Position = vec4(pos, 0.0, 1.0);
 }
 `;
@@ -116,7 +116,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VSOut {
   );
   var out: VSOut;
   out.pos = vec4<f32>(pos[index], 0.0, 1.0);
-  out.uv = pos[index] * 0.5 + vec2<f32>(0.5, 0.5);
+  out.uv = vec2<f32>(pos[index].x * 0.5 + 0.5, 1.0 - (pos[index].y * 0.5 + 0.5));
   return out;
 }
 

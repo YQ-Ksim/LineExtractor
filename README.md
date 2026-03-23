@@ -22,7 +22,6 @@
 ## 功能
 
 - 导出 PNG
-- 前后对比滑动条
 - 渲染后端切换：
   - `Auto (WebGPU > WebGL2 > CPU)`
   - `WebGPU`
@@ -58,8 +57,8 @@
 ## 文件结构
 
 - `index.html`：页面结构
-- `styles.css`：UI 样式与对比滑条布局
-- `app.js`：参数面板、调度、导出、对比交互、后端切换
+- `styles.css`：UI 样式
+- `app.js`：参数面板、调度、导出、后端切换
 - `worker.js`：FFT + 高通 + K + CPU 后处理 + 缓存失效策略
 - `gpu_renderer.js`：WebGPU/WebGL2 后处理渲染器
 - `.github/workflows/deploy-pages.yml`：GitHub Pages 自动部署工作流

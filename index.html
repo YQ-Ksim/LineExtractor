@@ -13,7 +13,7 @@
       <header class="app-header">
         <div>
           <h1>频域线稿提取器</h1>
-          <p>纯前端计算 | RGB 频域高通 + K 算法 + 分层缓存重算</p>
+          <p>纯前端计算 | RGB 高频提取 + K 算法 + 分层缓存</p>
         </div>
 
         <div class="toolbar">
@@ -51,23 +51,6 @@
               <canvas id="result-canvas"></canvas>
             </figure>
           </div>
-
-          <figure class="compare-figure">
-            <figcaption>前后对比滑动</figcaption>
-            <div id="compare-stage" class="compare-stage">
-              <canvas id="compare-source-canvas"></canvas>
-              <div id="compare-overlay" class="compare-overlay">
-                <canvas id="compare-result-canvas"></canvas>
-              </div>
-              <div id="compare-divider" class="compare-divider"></div>
-            </div>
-
-            <div class="compare-controls">
-              <label for="compare-slider">对比位置</label>
-              <input id="compare-slider" type="range" min="0" max="100" step="1" value="50" />
-              <span id="compare-value" class="value-badge">50%</span>
-            </div>
-          </figure>
         </section>
       </section>
 

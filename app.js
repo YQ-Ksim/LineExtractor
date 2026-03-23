@@ -5,18 +5,9 @@ const gpuRenderer = new HybridGpuRenderer();
 
 const sourceCanvas = document.getElementById("source-canvas");
 const resultCanvas = document.getElementById("result-canvas");
-const compareSourceCanvas = document.getElementById("compare-source-canvas");
-const compareResultCanvas = document.getElementById("compare-result-canvas");
-const compareStage = document.getElementById("compare-stage");
-const compareOverlay = document.getElementById("compare-overlay");
-const compareDivider = document.getElementById("compare-divider");
-const compareSlider = document.getElementById("compare-slider");
-const compareValue = document.getElementById("compare-value");
 
 const sourceCtx = sourceCanvas.getContext("2d", { alpha: false, willReadFrequently: true });
 const resultCtx = resultCanvas.getContext("2d", { alpha: false });
-const compareSourceCtx = compareSourceCanvas.getContext("2d", { alpha: false });
-const compareResultCtx = compareResultCanvas.getContext("2d", { alpha: false });
 
 const controlsRoot = document.getElementById("controls");
 const statusEl = document.getElementById("status");
@@ -105,7 +96,6 @@ let forceKMapSync = true;
 
 buildControls();
 bindEvents();
-applyComparePosition(Number(compareSlider.value));
 initializeBackend().then(() => loadDemoImage());
 
 worker.onmessage = (event) => {
@@ -192,7 +182,6 @@ function buildControls() {
     }
     frag.appendChild(section);
   }
-
   controlsRoot.appendChild(frag);
   updateDynamicControlState();
 }
@@ -293,10 +282,6 @@ function bindEvents() {
     exportPng();
   });
 
-  compareSlider.addEventListener("input", () => {
-    applyComparePosition(Number(compareSlider.value));
-  });
-
   backendSelect.addEventListener("change", async () => {
     backendPreference = backendSelect.value;
     await initializeBackend();
@@ -345,30 +330,21 @@ async function loadImageFromSource(source) {
 }
 
 function drawSource(image, width, height) {
-  resizeAllCanvases(width, height);
+  resizeCanvases(width, height);
 
   sourceCtx.clearRect(0, 0, width, height);
   sourceCtx.imageSmoothingEnabled = true;
   sourceCtx.imageSmoothingQuality = "high";
   sourceCtx.drawImage(image, 0, 0, width, height);
 
-  compareSourceCtx.clearRect(0, 0, width, height);
-  compareSourceCtx.drawImage(sourceCanvas, 0, 0);
-
   resultCtx.clearRect(0, 0, width, height);
-  compareResultCtx.clearRect(0, 0, width, height);
 }
 
-function resizeAllCanvases(width, height) {
+function resizeCanvases(width, height) {
   sourceCanvas.width = width;
   sourceCanvas.height = height;
   resultCanvas.width = width;
   resultCanvas.height = height;
-  compareSourceCanvas.width = width;
-  compareSourceCanvas.height = height;
-  compareResultCanvas.width = width;
-  compareResultCanvas.height = height;
-  compareStage.style.aspectRatio = `${width} / ${height}`;
 }
 
 function initWorkerImage() {
@@ -452,29 +428,19 @@ function pickDelay(changedKey) {
 
 function drawCpuResult(width, height, buffer) {
   if (resultCanvas.width !== width || resultCanvas.height !== height) {
-    resizeAllCanvases(width, height);
+    resizeCanvases(width, height);
   }
   const rgba = new Uint8ClampedArray(buffer);
   const imageData = new ImageData(rgba, width, height);
   resultCtx.putImageData(imageData, 0, 0);
-  compareResultCtx.putImageData(imageData, 0, 0);
 }
 
 function drawFromGpuCanvas(width, height) {
   if (resultCanvas.width !== width || resultCanvas.height !== height) {
-    resizeAllCanvases(width, height);
+    resizeCanvases(width, height);
   }
   resultCtx.clearRect(0, 0, width, height);
-  compareResultCtx.clearRect(0, 0, width, height);
   resultCtx.drawImage(gpuRenderer.canvas, 0, 0, width, height);
-  compareResultCtx.drawImage(gpuRenderer.canvas, 0, 0, width, height);
-}
-
-function applyComparePosition(percent) {
-  const p = Math.max(0, Math.min(100, Math.round(percent)));
-  compareOverlay.style.width = `${p}%`;
-  compareDivider.style.left = `${p}%`;
-  compareValue.textContent = `${p}%`;
 }
 
 function exportPng() {
