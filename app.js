@@ -31,6 +31,12 @@ const DEFAULT_PARAMS = {
   clipMax: 1.0,
   blur: 0,
   sharpen: 0.35,
+  regionBinarize: false,
+  regionTopPercent: 32,
+  segLineThreshold: 0.55,
+  segDilateRadius: 1,
+  segSeedSpacing: 8,
+  segSeedMinDist: 1.2,
 };
 
 const CONTROL_SCHEMA = [
@@ -63,10 +69,28 @@ const CONTROL_SCHEMA = [
       { key: "sharpen", label: "Sharpen", type: "range", min: 0, max: 3, step: 0.05 },
     ],
   },
+  {
+    title: "线稿引导区域二值化",
+    controls: [
+      { key: "regionBinarize", label: "启用区域排序二值化", type: "checkbox" },
+      { key: "regionTopPercent", label: "Top p% 设黑", type: "range", min: 1, max: 99, step: 1 },
+      { key: "segLineThreshold", label: "白线阈值", type: "range", min: 0.05, max: 0.95, step: 0.01 },
+      { key: "segDilateRadius", label: "线稿膨胀半径", type: "range", min: 0, max: 4, step: 1 },
+      { key: "segSeedSpacing", label: "种子网格间距", type: "range", min: 2, max: 24, step: 1 },
+      { key: "segSeedMinDist", label: "最小种子距离", type: "range", min: 0.1, max: 6, step: 0.1 },
+    ],
+  },
 ];
 
 const params = { ...DEFAULT_PARAMS };
 const bindings = new Map();
+const REGION_DETAIL_KEYS = new Set([
+  "regionTopPercent",
+  "segLineThreshold",
+  "segDilateRadius",
+  "segSeedSpacing",
+  "segSeedMinDist",
+]);
 
 const LAYER1_KEYS = new Set(["radius", "filterType", "butterOrder", "highpassStrength"]);
 const LAYER2_KEYS = new Set();
@@ -119,7 +143,7 @@ worker.onmessage = (event) => {
     let renderedBy = "CPU";
     let gpuMs = 0;
 
-    if (activeBackend !== "cpu" && gpuRenderer.isReady() && gpuRenderer.hasKMap()) {
+    if (!params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady() && gpuRenderer.hasKMap()) {
       gpuMs = gpuRenderer.render(params);
       drawFromGpuCanvas(message.width, message.height);
       renderedBy = activeBackend.toUpperCase();
@@ -140,10 +164,13 @@ worker.onmessage = (event) => {
     if (message.stats.recomputed.layer1) layers.push("Layer1");
     if (message.stats.recomputed.layer2) layers.push("Layer2");
     layers.push("Layer3");
+    if (message.stats.regionMs > 0) layers.push("Region");
 
     setStatus(
-      `输出完成 | 后端 ${renderedBy} | 重算 ${layers.join(" + ")} | 总耗时 ${message.stats.totalMs.toFixed(1)}ms` +
-        ` (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms, L3 ${message.stats.layer3Ms.toFixed(1)}ms` +
+      `输出完成 | 模式 ${params.regionBinarize ? "区域排序二值化" : "线稿"} | 后端 ${renderedBy}` +
+        ` | 重算 ${layers.join(" + ")} | 总耗时 ${message.stats.totalMs.toFixed(1)}ms` +
+        ` (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms,` +
+        ` L3 ${message.stats.layer3Ms.toFixed(1)}ms, Region ${message.stats.regionMs.toFixed(1)}ms` +
         `${renderedBy !== "CPU" ? `, GPU ${gpuMs.toFixed(1)}ms` : ""})`
     );
     return;
@@ -184,11 +211,11 @@ function createControlRow(control) {
     input.checked = Boolean(params[control.key]);
     input.addEventListener("change", () => {
       params[control.key] = input.checked;
+      updateDynamicControlState();
       requestRender(control.key);
     });
     row.appendChild(input);
-
-    bindings.set(control.key, { input, type: "checkbox" });
+    bindings.set(control.key, { input, type: "checkbox", row });
     return row;
   }
 
@@ -318,12 +345,10 @@ async function loadImageFromSource(source) {
 
 function drawSource(image, width, height) {
   resizeCanvases(width, height);
-
   sourceCtx.clearRect(0, 0, width, height);
   sourceCtx.imageSmoothingEnabled = true;
   sourceCtx.imageSmoothingQuality = "high";
   sourceCtx.drawImage(image, 0, 0, width, height);
-
   resultCtx.clearRect(0, 0, width, height);
 }
 
@@ -358,13 +383,11 @@ function initWorkerImage() {
 
 function requestRender(changedKey = "", force = false) {
   if (!isImageReady) return;
-
-  if (renderTimer !== null) {
-    clearTimeout(renderTimer);
-  }
+  if (renderTimer !== null) clearTimeout(renderTimer);
 
   const canLocalGpu =
     !force &&
+    !params.regionBinarize &&
     changedKey &&
     activeBackend !== "cpu" &&
     gpuRenderer.isReady() &&
@@ -385,20 +408,23 @@ function requestRender(changedKey = "", force = false) {
     }
 
     requestId += 1;
-    const useGpu = activeBackend !== "cpu" && gpuRenderer.isReady();
+    const useGpu = !params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady();
+
     worker.postMessage({
       type: "process",
       id: requestId,
       params: { ...params },
       options: {
-        needRgba: !useGpu,
+        needRgba: !useGpu || params.regionBinarize,
         needKMap: useGpu,
         forceKMap: forceKMapSync,
       },
     });
     forceKMapSync = false;
 
-    if (useGpu) {
+    if (params.regionBinarize) {
+      setStatus("正在执行线稿引导区域分割与排序二值化...");
+    } else if (useGpu) {
       setStatus("正在计算 Layer1/Layer2，Layer3 由 GPU 渲染...");
     } else {
       setStatus("正在计算...");
@@ -417,8 +443,7 @@ function drawCpuResult(width, height, buffer) {
   if (resultCanvas.width !== width || resultCanvas.height !== height) {
     resizeCanvases(width, height);
   }
-  const rgba = new Uint8ClampedArray(buffer);
-  const imageData = new ImageData(rgba, width, height);
+  const imageData = new ImageData(new Uint8ClampedArray(buffer), width, height);
   resultCtx.putImageData(imageData, 0, 0);
 }
 
@@ -435,13 +460,11 @@ function exportPng() {
     setStatus("当前没有可导出的输出图像");
     return;
   }
-
   resultCanvas.toBlob((blob) => {
     if (!blob) {
       setStatus("导出失败：无法生成 PNG");
       return;
     }
-
     const url = URL.createObjectURL(blob);
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     const a = document.createElement("a");
@@ -460,12 +483,18 @@ function updateDynamicControlState() {
     orderBinding.input.disabled = !isButterworth;
     orderBinding.row.style.opacity = isButterworth ? "1" : "0.45";
   }
+
+  for (const key of REGION_DETAIL_KEYS) {
+    const binding = bindings.get(key);
+    if (!binding?.input) continue;
+    binding.input.disabled = !params.regionBinarize;
+    if (binding.row) binding.row.style.opacity = params.regionBinarize ? "1" : "0.45";
+  }
 }
 
 function guardClipBounds(changedKey) {
   if (changedKey !== "clipMin" && changedKey !== "clipMax") return;
   if (params.clipMin <= params.clipMax) return;
-
   if (changedKey === "clipMin") {
     params.clipMax = params.clipMin;
     updateControlValue("clipMax");
@@ -476,9 +505,7 @@ function guardClipBounds(changedKey) {
 }
 
 function syncControlValues() {
-  for (const key of bindings.keys()) {
-    updateControlValue(key);
-  }
+  for (const key of bindings.keys()) updateControlValue(key);
 }
 
 function updateControlValue(key) {
@@ -492,16 +519,12 @@ function updateControlValue(key) {
 
   if (binding.type === "select") {
     binding.input.value = String(params[key]);
-    if (binding.value) {
-      binding.value.textContent = String(binding.input.options[binding.input.selectedIndex].textContent);
-    }
+    if (binding.value) binding.value.textContent = String(binding.input.options[binding.input.selectedIndex].textContent);
     return;
   }
 
   binding.input.value = String(params[key]);
-  if (binding.value) {
-    binding.value.textContent = formatValue(params[key], binding.step);
-  }
+  if (binding.value) binding.value.textContent = formatValue(params[key], binding.step);
 }
 
 function formatValue(value, step = 1) {

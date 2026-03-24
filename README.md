@@ -1,34 +1,27 @@
 # LineExtractor Frontend
 
-纯前端线稿提取工具，所有计算都在浏览器本地完成，无后端依赖。
+纯前端线稿提取与区域二值化工具，所有计算均在浏览器本地完成，无后端依赖。
 
-## 核心流程
+## 功能
 
-`RGB Split -> FFT -> High-pass -> IFFT -> K -> Normalize/Contrast/Threshold/Clip/Blur/Sharpen -> Output`
+- 频域高通线稿提取（RGB 多通道 + K 算法）
+- 分层缓存（Layer1/Layer2/Layer3）
+- WebGPU / WebGL2 / CPU 渲染切换（线稿模式）
+- 线稿引导区域分割 + 区域排序二值化（纯前端 Worker）
+- PNG 导出
 
-## 参数说明
+## 新增区域算法
 
-- `K` 算法参数已固定为默认公式，不再提供可调项：
-  - `K = (R² + G² + B²) / [256 (R + G + B)]`
-- 可调参数仅保留：
-  - FFT / Filter
-  - Post Processing
+流程：
 
-## 默认参数
-
-- FFT / Filter
-  - `R 半径`: `160`
-  - `高通类型`: `Butterworth`
-  - `Butterworth 阶数`: `2`
-  - `高通强度`: `0.80`
-- Post Processing
-  - `Normalize`: 勾选
-  - `Contrast`: `0.80`
-  - `Threshold`: `0.15`
-  - `Clip Min`: `0.01`
-  - `Clip Max`: `1.00`
-  - `Blur`: `0`
-  - `Sharpen`: `0.35`
+1. 线稿二值化 + 膨胀，作为区域扩散屏障
+2. 非线稿区域距离变换
+3. 网格局部极值种子 + 连通域补种子
+4. 屏障约束区域生长，得到 Label Map
+5. 计算区域平均灰度
+6. 构建区域邻接图（RAG）
+7. `score_i = Σ_{j∈N_i}(G_j - G_i)` 评分
+8. 按 score 排序，取 Top p% 区域置黑，其余置白
 
 ## 本地运行
 
@@ -40,20 +33,4 @@
 
 ## GitHub Pages 自动部署
 
-仓库包含工作流：`/.github/workflows/deploy-pages.yml`
-
-首次启用步骤：
-
-1. 推送代码到 `main` 分支。
-2. 打开仓库 `Settings -> Pages`。
-3. `Source` 选择 `GitHub Actions`。
-4. 再次 `push` 或手动运行 `Actions -> Deploy To GitHub Pages`。
-
-## 文件结构
-
-- `index.html`: 页面结构
-- `styles.css`: UI 样式
-- `app.js`: 参数面板、调度、导出、后端切换
-- `worker.js`: FFT + 高频 + K + CPU 后处理 + 缓存策略
-- `gpu_renderer.js`: WebGPU/WebGL2 后处理渲染器
-- `.github/workflows/deploy-pages.yml`: GitHub Pages 自动部署
+仓库已包含工作流：`/.github/workflows/deploy-pages.yml`

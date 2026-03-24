@@ -1,4 +1,5 @@
 const EPS = 1e-8;
+const INF_DIST = 1e9;
 
 const state = {
   ready: false,
@@ -9,6 +10,7 @@ const state = {
   totalPix: 0,
   totalPad: 0,
   fft: null,
+  grayOriginal: null,
   distance: null,
   mask: null,
   edges: null,
@@ -19,6 +21,7 @@ const state = {
   tmpReal: null,
   tmpImag: null,
   fftScratch: null,
+  seg: null,
   kRange: { min: 0, max: 1 },
   kVersion: 0,
   cache: {
@@ -35,7 +38,6 @@ self.onmessage = (event) => {
       initImage(message);
       return;
     }
-
     if (message.type === "process") {
       processFrame(message.id, message.params, message.options || {});
       return;
@@ -52,10 +54,7 @@ function initImage(message) {
   const t0 = performance.now();
   const width = message.width | 0;
   const height = message.height | 0;
-
-  if (width <= 0 || height <= 0) {
-    throw new Error("图像尺寸无效");
-  }
+  if (width <= 0 || height <= 0) throw new Error("Invalid image size");
 
   const rgba = new Uint8ClampedArray(message.data);
   const padW = nextPow2(width);
@@ -66,16 +65,22 @@ function initImage(message) {
   const rSpatial = new Float32Array(totalPad);
   const gSpatial = new Float32Array(totalPad);
   const bSpatial = new Float32Array(totalPad);
+  const grayOriginal = new Float32Array(totalPix);
 
   for (let y = 0; y < height; y += 1) {
     const srcRow = y * width * 4;
     const dstRow = y * padW;
+    const grayRow = y * width;
     for (let x = 0; x < width; x += 1) {
       const src = srcRow + x * 4;
       const dst = dstRow + x;
-      rSpatial[dst] = rgba[src];
-      gSpatial[dst] = rgba[src + 1];
-      bSpatial[dst] = rgba[src + 2];
+      const r = rgba[src];
+      const g = rgba[src + 1];
+      const b = rgba[src + 2];
+      rSpatial[dst] = r;
+      gSpatial[dst] = g;
+      bSpatial[dst] = b;
+      grayOriginal[grayRow + x] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     }
   }
 
@@ -105,6 +110,7 @@ function initImage(message) {
   state.totalPix = totalPix;
   state.totalPad = totalPad;
   state.fft = { rReal, rImag, gReal, gImag, bReal, bImag };
+  state.grayOriginal = grayOriginal;
   state.distance = buildDistanceMap(padW, padH);
   state.mask = new Float32Array(totalPad);
   state.tmpReal = new Float32Array(totalPad);
@@ -119,6 +125,15 @@ function initImage(message) {
   state.workA = new Float32Array(totalPix);
   state.workB = new Float32Array(totalPix);
   state.blurTemp = new Float32Array(totalPix);
+  state.seg = {
+    lineMask: new Uint8Array(totalPix),
+    barrier: new Uint8Array(totalPix),
+    tempU8: new Uint8Array(totalPix),
+    dist: new Float32Array(totalPix),
+    labels: new Int32Array(totalPix),
+    queue: new Int32Array(totalPix),
+    visited: new Uint8Array(totalPix),
+  };
   state.kRange = { min: 0, max: 1 };
   state.kVersion = 0;
   state.cache.layer1Key = "";
@@ -139,9 +154,7 @@ function initImage(message) {
 }
 
 function processFrame(id, rawParams, options) {
-  if (!state.ready) {
-    throw new Error("图像尚未初始化");
-  }
+  if (!state.ready) throw new Error("Image not initialized");
 
   const needRgba = options.needRgba !== false;
   const needKMap = Boolean(options.needKMap);
@@ -152,6 +165,7 @@ function processFrame(id, rawParams, options) {
   let layer1Ms = 0;
   let layer2Ms = 0;
   let layer3Ms = 0;
+  let regionMs = 0;
   let recomputeLayer1 = false;
   let recomputeLayer2 = false;
 
@@ -177,8 +191,16 @@ function processFrame(id, rawParams, options) {
   let output = null;
   if (needRgba) {
     const s = performance.now();
-    output = postprocess(params);
+    const tone = postprocessTone(params);
     layer3Ms = performance.now() - s;
+
+    if (params.regionBinarize) {
+      const r = performance.now();
+      output = lineGuidedRegionBinarize(tone, params);
+      regionMs = performance.now() - r;
+    } else {
+      output = grayscaleToRgba(tone);
+    }
   }
 
   let kMapBuffer = null;
@@ -208,6 +230,7 @@ function processFrame(id, rawParams, options) {
         layer1Ms,
         layer2Ms,
         layer3Ms,
+        regionMs,
         recomputed: {
           layer1: recomputeLayer1,
           layer2: recomputeLayer2,
@@ -231,11 +254,15 @@ function sanitizeParams(params) {
     clipMax: clampNumber(params.clipMax, 0, 1, 1),
     blur: clampNumber(params.blur, 0, 16, 0),
     sharpen: clampNumber(params.sharpen, 0, 10, 0.35),
+    regionBinarize: Boolean(params.regionBinarize),
+    regionTopPercent: clampNumber(params.regionTopPercent, 1, 99, 32),
+    segLineThreshold: clampNumber(params.segLineThreshold, 0.01, 0.99, 0.55),
+    segDilateRadius: clampNumber(params.segDilateRadius, 0, 8, 1),
+    segSeedSpacing: clampNumber(params.segSeedSpacing, 2, 64, 8),
+    segSeedMinDist: clampNumber(params.segSeedMinDist, 0, 64, 1.2),
   };
 
-  if (safe.clipMin > safe.clipMax) {
-    safe.clipMax = safe.clipMin;
-  }
+  if (safe.clipMin > safe.clipMax) safe.clipMax = safe.clipMin;
   return safe;
 }
 
@@ -337,7 +364,7 @@ function recomputeK() {
   state.kVersion += 1;
 }
 
-function postprocess(params) {
+function postprocessTone(params) {
   let current = state.workA;
   let scratch = state.workB;
   current.set(state.kBuffer);
@@ -365,7 +392,397 @@ function postprocess(params) {
     }
   }
 
-  return grayscaleToRgba(current);
+  return current;
+}
+
+function lineGuidedRegionBinarize(tone, params) {
+  const width = state.width;
+  const height = state.height;
+  const n = state.totalPix;
+  const gray = state.grayOriginal;
+  const seg = state.seg;
+
+  // Layer3 line sketch is "black background + white lines",
+  // so white pixels are treated as segmentation barriers.
+  buildLineMask(tone, seg.lineMask, params.segLineThreshold, n);
+  dilateBinary(seg.lineMask, seg.barrier, seg.tempU8, width, height, Math.round(params.segDilateRadius));
+  computeChamferDistance(seg.barrier, seg.dist, width, height, n);
+
+  const seedSpacing = Math.max(2, Math.round(params.segSeedSpacing));
+  const seedMinDist = params.segSeedMinDist;
+  let seedCount = placeGridSeeds(seg.dist, seg.barrier, seg.labels, width, height, seedSpacing, seedMinDist);
+  seedCount = ensureSeedPerComponent(seg.dist, seg.barrier, seg.labels, seg.visited, seg.queue, width, height, n, seedCount);
+  seedCount = propagateLabels(seg.barrier, seg.labels, seg.queue, width, height, n, seedCount);
+
+  if (seedCount <= 0) {
+    return grayscaleToRgba(tone);
+  }
+
+  const stats = computeRegionStatsAndCompact(seg.labels, gray, width, height, n, seedCount);
+  const regionCount = stats.regionCount;
+  if (regionCount <= 0) return grayscaleToRgba(tone);
+
+  const adjacency = buildRegionAdjacency(seg.labels, width, height, regionCount);
+  const score = computeRegionScore(adjacency, stats.meanGray, regionCount);
+  const blackRegion = chooseTopRegions(score, regionCount, params.regionTopPercent);
+
+  const out = new Uint8ClampedArray(n * 4);
+  for (let i = 0; i < n; i += 1) {
+    let c = 255;
+    if (seg.barrier[i]) {
+      c = 255;
+    } else {
+      const id = seg.labels[i];
+      if (id > 0 && blackRegion[id]) c = 0;
+    }
+    const base = i * 4;
+    out[base] = c;
+    out[base + 1] = c;
+    out[base + 2] = c;
+    out[base + 3] = 255;
+  }
+  return out;
+}
+
+function buildLineMask(tone, outMask, lineThreshold, n) {
+  for (let i = 0; i < n; i += 1) {
+    outMask[i] = tone[i] >= lineThreshold ? 1 : 0;
+  }
+}
+
+function dilateBinary(src, dst, temp, width, height, radius) {
+  if (radius <= 0) {
+    dst.set(src);
+    return;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      let v = 0;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const xx = clampInt(x + dx, 0, width - 1);
+        if (src[row + xx]) {
+          v = 1;
+          break;
+        }
+      }
+      temp[row + x] = v;
+    }
+  }
+
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) {
+      let v = 0;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const yy = clampInt(y + dy, 0, height - 1);
+        if (temp[yy * width + x]) {
+          v = 1;
+          break;
+        }
+      }
+      dst[y * width + x] = v;
+    }
+  }
+}
+
+function computeChamferDistance(barrier, dist, width, height, n) {
+  for (let i = 0; i < n; i += 1) {
+    dist[i] = barrier[i] ? 0 : INF_DIST;
+  }
+
+  const d1 = 1.0;
+  const d2 = 1.41421356;
+
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      const idx = row + x;
+      let best = dist[idx];
+
+      if (x > 0) best = Math.min(best, dist[idx - 1] + d1);
+      if (y > 0) best = Math.min(best, dist[idx - width] + d1);
+      if (x > 0 && y > 0) best = Math.min(best, dist[idx - width - 1] + d2);
+      if (x + 1 < width && y > 0) best = Math.min(best, dist[idx - width + 1] + d2);
+
+      dist[idx] = best;
+    }
+  }
+
+  for (let y = height - 1; y >= 0; y -= 1) {
+    const row = y * width;
+    for (let x = width - 1; x >= 0; x -= 1) {
+      const idx = row + x;
+      let best = dist[idx];
+
+      if (x + 1 < width) best = Math.min(best, dist[idx + 1] + d1);
+      if (y + 1 < height) best = Math.min(best, dist[idx + width] + d1);
+      if (x + 1 < width && y + 1 < height) best = Math.min(best, dist[idx + width + 1] + d2);
+      if (x > 0 && y + 1 < height) best = Math.min(best, dist[idx + width - 1] + d2);
+
+      dist[idx] = best;
+    }
+  }
+}
+
+function placeGridSeeds(dist, barrier, labels, width, height, spacing, minDist) {
+  labels.fill(0);
+  let seedCount = 0;
+
+  for (let i = 0; i < labels.length; i += 1) {
+    if (barrier[i]) labels[i] = -1;
+  }
+
+  for (let y0 = 0; y0 < height; y0 += spacing) {
+    const y1 = Math.min(height, y0 + spacing);
+    for (let x0 = 0; x0 < width; x0 += spacing) {
+      const x1 = Math.min(width, x0 + spacing);
+
+      let best = -1;
+      let bestDist = -1;
+
+      for (let y = y0; y < y1; y += 1) {
+        const row = y * width;
+        for (let x = x0; x < x1; x += 1) {
+          const idx = row + x;
+          if (barrier[idx]) continue;
+          const d = dist[idx];
+          if (d > bestDist) {
+            bestDist = d;
+            best = idx;
+          }
+        }
+      }
+
+      if (best >= 0 && bestDist >= minDist && labels[best] === 0) {
+        seedCount += 1;
+        labels[best] = seedCount;
+      }
+    }
+  }
+  return seedCount;
+}
+
+function ensureSeedPerComponent(dist, barrier, labels, visited, queue, width, height, n, seedCount) {
+  visited.fill(0);
+  let nextSeed = seedCount;
+
+  for (let start = 0; start < n; start += 1) {
+    if (barrier[start] || visited[start]) continue;
+
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+
+    let hasSeed = false;
+    let bestIdx = start;
+    let bestDist = dist[start];
+
+    while (head < tail) {
+      const idx = queue[head++];
+      if (labels[idx] > 0) hasSeed = true;
+
+      const d = dist[idx];
+      if (d > bestDist) {
+        bestDist = d;
+        bestIdx = idx;
+      }
+
+      const x = idx % width;
+      const y = (idx / width) | 0;
+
+      if (x > 0) {
+        const nb = idx - 1;
+        if (!barrier[nb] && !visited[nb]) {
+          visited[nb] = 1;
+          queue[tail++] = nb;
+        }
+      }
+      if (x + 1 < width) {
+        const nb = idx + 1;
+        if (!barrier[nb] && !visited[nb]) {
+          visited[nb] = 1;
+          queue[tail++] = nb;
+        }
+      }
+      if (y > 0) {
+        const nb = idx - width;
+        if (!barrier[nb] && !visited[nb]) {
+          visited[nb] = 1;
+          queue[tail++] = nb;
+        }
+      }
+      if (y + 1 < height) {
+        const nb = idx + width;
+        if (!barrier[nb] && !visited[nb]) {
+          visited[nb] = 1;
+          queue[tail++] = nb;
+        }
+      }
+    }
+
+    if (!hasSeed) {
+      nextSeed += 1;
+      labels[bestIdx] = nextSeed;
+    }
+  }
+
+  return nextSeed;
+}
+
+function propagateLabels(barrier, labels, queue, width, height, n, seedCount) {
+  let head = 0;
+  let tail = 0;
+
+  for (let i = 0; i < n; i += 1) {
+    if (labels[i] > 0) {
+      queue[tail++] = i;
+    }
+  }
+
+  while (head < tail) {
+    const idx = queue[head++];
+    const label = labels[idx];
+    const x = idx % width;
+    const y = (idx / width) | 0;
+
+    if (x > 0) {
+      const nb = idx - 1;
+      if (!barrier[nb] && labels[nb] === 0) {
+        labels[nb] = label;
+        queue[tail++] = nb;
+      }
+    }
+    if (x + 1 < width) {
+      const nb = idx + 1;
+      if (!barrier[nb] && labels[nb] === 0) {
+        labels[nb] = label;
+        queue[tail++] = nb;
+      }
+    }
+    if (y > 0) {
+      const nb = idx - width;
+      if (!barrier[nb] && labels[nb] === 0) {
+        labels[nb] = label;
+        queue[tail++] = nb;
+      }
+    }
+    if (y + 1 < height) {
+      const nb = idx + width;
+      if (!barrier[nb] && labels[nb] === 0) {
+        labels[nb] = label;
+        queue[tail++] = nb;
+      }
+    }
+  }
+
+  // Fallback for rare residual unlabeled pixels.
+  let maxLabel = seedCount;
+  for (let i = 0; i < n; i += 1) {
+    if (!barrier[i] && labels[i] === 0) {
+      maxLabel += 1;
+      labels[i] = maxLabel;
+    }
+  }
+  return maxLabel;
+}
+
+function computeRegionStatsAndCompact(labels, gray, width, height, n, maxLabel) {
+  const size = new Int32Array(maxLabel + 1);
+  const sumGray = new Float64Array(maxLabel + 1);
+
+  for (let i = 0; i < n; i += 1) {
+    const id = labels[i];
+    if (id > 0) {
+      size[id] += 1;
+      sumGray[id] += gray[i];
+    }
+  }
+
+  const remap = new Int32Array(maxLabel + 1);
+  let regionCount = 0;
+  for (let id = 1; id <= maxLabel; id += 1) {
+    if (size[id] > 0) {
+      regionCount += 1;
+      remap[id] = regionCount;
+    }
+  }
+
+  const meanGray = new Float32Array(regionCount + 1);
+  if (regionCount === 0) {
+    return { regionCount, meanGray };
+  }
+
+  for (let id = 1; id <= maxLabel; id += 1) {
+    const mapped = remap[id];
+    if (!mapped) continue;
+    meanGray[mapped] = sumGray[id] / Math.max(1, size[id]);
+  }
+
+  for (let i = 0; i < n; i += 1) {
+    const id = labels[i];
+    if (id > 0) labels[i] = remap[id];
+  }
+
+  return { regionCount, meanGray };
+}
+
+function buildRegionAdjacency(labels, width, height, regionCount) {
+  const adjacency = Array.from({ length: regionCount + 1 }, () => new Set());
+
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      const idx = row + x;
+      const a = labels[idx];
+      if (a <= 0) continue;
+
+      if (x + 1 < width) {
+        const b = labels[idx + 1];
+        if (b > 0 && b !== a) {
+          adjacency[a].add(b);
+          adjacency[b].add(a);
+        }
+      }
+
+      if (y + 1 < height) {
+        const b = labels[idx + width];
+        if (b > 0 && b !== a) {
+          adjacency[a].add(b);
+          adjacency[b].add(a);
+        }
+      }
+    }
+  }
+  return adjacency;
+}
+
+function computeRegionScore(adjacency, meanGray, regionCount) {
+  const score = new Float32Array(regionCount + 1);
+  for (let i = 1; i <= regionCount; i += 1) {
+    let s = 0;
+    for (const j of adjacency[i]) {
+      s += meanGray[j] - meanGray[i];
+    }
+    score[i] = s;
+  }
+  return score;
+}
+
+function chooseTopRegions(score, regionCount, topPercent) {
+  const ids = [];
+  for (let i = 1; i <= regionCount; i += 1) ids.push(i);
+  ids.sort((a, b) => score[b] - score[a]);
+
+  let blackCount = Math.round((topPercent / 100) * regionCount);
+  blackCount = clampInt(blackCount, 1, regionCount);
+
+  const black = new Uint8Array(regionCount + 1);
+  for (let i = 0; i < blackCount; i += 1) {
+    black[ids[i]] = 1;
+  }
+  return black;
 }
 
 function normalizeInPlace(buffer) {
@@ -492,6 +909,7 @@ function buildDistanceMap(width, height) {
 function fft2D(real, imag, width, height, inverse, scratch) {
   const rowReal = scratch.rowReal;
   const rowImag = scratch.rowImag;
+
   for (let y = 0; y < height; y += 1) {
     const offset = y * width;
     for (let x = 0; x < width; x += 1) {
