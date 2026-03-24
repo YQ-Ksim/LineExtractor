@@ -39,6 +39,11 @@ const DEFAULT_PARAMS = {
   segDilateRadius: 1,
   segSeedSpacing: 8,
   segSeedMinDist: 1.2,
+  ragMergeKeepPercent: 40,
+  ragAlpha: 1.0,
+  ragBeta: 0.8,
+  ragGamma: 2.0,
+  ragMaxMerges: 1200,
 };
 
 const CONTROL_SCHEMA = [
@@ -82,6 +87,11 @@ const CONTROL_SCHEMA = [
       { key: "segDilateRadius", label: "线稿膨胀半径", type: "range", min: 0, max: 4, step: 1 },
       { key: "segSeedSpacing", label: "种子网格间距", type: "range", min: 2, max: 24, step: 1 },
       { key: "segSeedMinDist", label: "最小种子距离", type: "range", min: 0.1, max: 6, step: 0.1 },
+      { key: "ragMergeKeepPercent", label: "合并后保留区域%", type: "range", min: 5, max: 100, step: 1 },
+      { key: "ragAlpha", label: "α 灰度权重", type: "range", min: 0, max: 4, step: 0.05 },
+      { key: "ragBeta", label: "β 颜色权重", type: "range", min: 0, max: 4, step: 0.05 },
+      { key: "ragGamma", label: "γ 边界权重", type: "range", min: 0, max: 20, step: 0.1 },
+      { key: "ragMaxMerges", label: "最大合并步数", type: "range", min: 0, max: 5000, step: 10 },
     ],
   },
 ];
@@ -96,6 +106,11 @@ const REGION_DETAIL_KEYS = new Set([
   "segDilateRadius",
   "segSeedSpacing",
   "segSeedMinDist",
+  "ragMergeKeepPercent",
+  "ragAlpha",
+  "ragBeta",
+  "ragGamma",
+  "ragMaxMerges",
 ]);
 
 const LAYER1_KEYS = new Set(["radius", "filterType", "butterOrder", "highpassStrength"]);
@@ -173,10 +188,11 @@ worker.onmessage = (event) => {
     if (message.stats.regionMs > 0) layers.push("Region");
 
     setStatus(
-      `输出完成 | 模式 ${params.regionBinarize ? "区域排序二值化" : "线稿"} | 后端 ${renderedBy}` +
+        `输出完成 | 模式 ${params.regionBinarize ? "区域排序二值化" : "线稿"} | 后端 ${renderedBy}` +
         ` | 重算 ${layers.join(" + ")} | 总耗时 ${message.stats.totalMs.toFixed(1)}ms` +
         ` (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms,` +
         ` L3 ${message.stats.layer3Ms.toFixed(1)}ms, Region ${message.stats.regionMs.toFixed(1)}ms` +
+        `${params.regionBinarize ? `, RAG ${message.stats.ragMs.toFixed(1)}ms/${message.stats.ragMerges} merges` : ""}` +
         `${renderedBy !== "CPU" ? `, GPU ${gpuMs.toFixed(1)}ms` : ""})`
     );
     return;

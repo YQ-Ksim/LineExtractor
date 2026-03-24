@@ -11,6 +11,9 @@ const state = {
   totalPad: 0,
   fft: null,
   grayOriginal: null,
+  origR: null,
+  origG: null,
+  origB: null,
   distance: null,
   mask: null,
   edges: null,
@@ -66,6 +69,9 @@ function initImage(message) {
   const gSpatial = new Float32Array(totalPad);
   const bSpatial = new Float32Array(totalPad);
   const grayOriginal = new Float32Array(totalPix);
+  const origR = new Float32Array(totalPix);
+  const origG = new Float32Array(totalPix);
+  const origB = new Float32Array(totalPix);
 
   for (let y = 0; y < height; y += 1) {
     const srcRow = y * width * 4;
@@ -80,7 +86,11 @@ function initImage(message) {
       rSpatial[dst] = r;
       gSpatial[dst] = g;
       bSpatial[dst] = b;
-      grayOriginal[grayRow + x] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      const p = grayRow + x;
+      grayOriginal[p] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      origR[p] = r / 255;
+      origG[p] = g / 255;
+      origB[p] = b / 255;
     }
   }
 
@@ -111,6 +121,9 @@ function initImage(message) {
   state.totalPad = totalPad;
   state.fft = { rReal, rImag, gReal, gImag, bReal, bImag };
   state.grayOriginal = grayOriginal;
+  state.origR = origR;
+  state.origG = origG;
+  state.origB = origB;
   state.distance = buildDistanceMap(padW, padH);
   state.mask = new Float32Array(totalPad);
   state.tmpReal = new Float32Array(totalPad);
@@ -166,6 +179,8 @@ function processFrame(id, rawParams, options) {
   let layer2Ms = 0;
   let layer3Ms = 0;
   let regionMs = 0;
+  let ragMs = 0;
+  let ragMerges = 0;
   let recomputeLayer1 = false;
   let recomputeLayer2 = false;
 
@@ -196,7 +211,10 @@ function processFrame(id, rawParams, options) {
 
     if (params.regionBinarize) {
       const r = performance.now();
-      output = lineGuidedRegionBinarize(tone, params);
+      const regionResult = lineGuidedRegionBinarize(tone, params);
+      output = regionResult.image;
+      ragMs = regionResult.ragMs;
+      ragMerges = regionResult.ragMerges;
       regionMs = performance.now() - r;
     } else {
       output = grayscaleToRgba(tone);
@@ -231,6 +249,8 @@ function processFrame(id, rawParams, options) {
         layer2Ms,
         layer3Ms,
         regionMs,
+        ragMs,
+        ragMerges,
         recomputed: {
           layer1: recomputeLayer1,
           layer2: recomputeLayer2,
@@ -262,6 +282,11 @@ function sanitizeParams(params) {
     segDilateRadius: clampNumber(params.segDilateRadius, 0, 8, 1),
     segSeedSpacing: clampNumber(params.segSeedSpacing, 2, 64, 8),
     segSeedMinDist: clampNumber(params.segSeedMinDist, 0, 64, 1.2),
+    ragMergeKeepPercent: clampNumber(params.ragMergeKeepPercent, 1, 100, 40),
+    ragAlpha: clampNumber(params.ragAlpha, 0, 100, 1),
+    ragBeta: clampNumber(params.ragBeta, 0, 100, 0.8),
+    ragGamma: clampNumber(params.ragGamma, 0, 1000, 2),
+    ragMaxMerges: clampNumber(params.ragMaxMerges, 0, 20000, 1200),
   };
 
   if (safe.clipMin > safe.clipMax) safe.clipMax = safe.clipMin;
@@ -402,14 +427,16 @@ function lineGuidedRegionBinarize(tone, params) {
   const height = state.height;
   const n = state.totalPix;
   const gray = state.grayOriginal;
+  const origR = state.origR;
+  const origG = state.origG;
+  const origB = state.origB;
   const seg = state.seg;
 
-  // Layer3 line sketch is "black background + white lines",
-  // so white pixels are treated as segmentation barriers.
+  // Layer3 line sketch is black background + white lines.
+  // White lines are hard barriers for region growth.
   buildLineMask(tone, seg.lineMask, params.segLineThreshold, n);
   const denoiseRadius = Math.round(params.segLineDenoiseRadius);
   if (denoiseRadius > 0) {
-    // Opening removes isolated white speckles before segmentation.
     erodeBinary(seg.lineMask, seg.barrier, seg.tempU8, width, height, denoiseRadius);
     dilateBinary(seg.barrier, seg.lineMask, seg.tempU8, width, height, denoiseRadius);
   }
@@ -427,23 +454,24 @@ function lineGuidedRegionBinarize(tone, params) {
   seedCount = propagateLabels(seg.barrier, seg.labels, seg.queue, width, height, n, seedCount);
 
   if (seedCount <= 0) {
-    return grayscaleToRgba(tone);
+    return { image: grayscaleToRgba(tone), ragMs: 0, ragMerges: 0 };
   }
 
-  const stats = computeRegionStatsAndCompact(seg.labels, gray, width, height, n, seedCount);
-  const regionCount = stats.regionCount;
-  if (regionCount <= 0) return grayscaleToRgba(tone);
+  const stats = computeRegionStatsAndCompact(seg.labels, gray, origR, origG, origB, n, seedCount);
+  if (stats.regionCount <= 0) {
+    return { image: grayscaleToRgba(tone), ragMs: 0, ragMerges: 0 };
+  }
 
-  const adjacency = buildRegionAdjacency(seg.labels, width, height, regionCount);
-  const score = computeRegionScore(adjacency, stats.meanGray, regionCount);
-  const blackRegion = chooseTopRegions(score, regionCount, params.regionTopPercent);
+  const graph = buildRegionBoundaryGraph(seg.labels, width, height, stats.regionCount);
+  const merged = ragMergeRegions(seg.labels, stats, graph, params, width, height);
+
+  const score = computeRegionScore(merged.adjacency, merged.meanGray, merged.regionCount);
+  const blackRegion = chooseTopRegions(score, merged.regionCount, params.regionTopPercent);
 
   const out = new Uint8ClampedArray(n * 4);
   for (let i = 0; i < n; i += 1) {
     let c = 255;
-    if (seg.barrier[i]) {
-      c = 255;
-    } else {
+    if (!seg.barrier[i]) {
       const id = seg.labels[i];
       if (id > 0 && blackRegion[id]) c = 0;
     }
@@ -453,7 +481,12 @@ function lineGuidedRegionBinarize(tone, params) {
     out[base + 2] = c;
     out[base + 3] = 255;
   }
-  return out;
+
+  return {
+    image: out,
+    ragMs: merged.mergeMs,
+    ragMerges: merged.mergeCount,
+  };
 }
 
 function buildLineMask(tone, outMask, lineThreshold, n) {
@@ -725,9 +758,7 @@ function propagateLabels(barrier, labels, queue, width, height, n, seedCount) {
   let tail = 0;
 
   for (let i = 0; i < n; i += 1) {
-    if (labels[i] > 0) {
-      queue[tail++] = i;
-    }
+    if (labels[i] > 0) queue[tail++] = i;
   }
 
   while (head < tail) {
@@ -766,7 +797,6 @@ function propagateLabels(barrier, labels, queue, width, height, n, seedCount) {
     }
   }
 
-  // Fallback for rare residual unlabeled pixels.
   let maxLabel = seedCount;
   for (let i = 0; i < n; i += 1) {
     if (!barrier[i] && labels[i] === 0) {
@@ -777,36 +807,48 @@ function propagateLabels(barrier, labels, queue, width, height, n, seedCount) {
   return maxLabel;
 }
 
-function computeRegionStatsAndCompact(labels, gray, width, height, n, maxLabel) {
-  const size = new Int32Array(maxLabel + 1);
-  const sumGray = new Float64Array(maxLabel + 1);
+function computeRegionStatsAndCompact(labels, gray, origR, origG, origB, n, maxLabel) {
+  const sizeRaw = new Int32Array(maxLabel + 1);
+  const sumGrayRaw = new Float64Array(maxLabel + 1);
+  const sumRRaw = new Float64Array(maxLabel + 1);
+  const sumGRaw = new Float64Array(maxLabel + 1);
+  const sumBRaw = new Float64Array(maxLabel + 1);
 
   for (let i = 0; i < n; i += 1) {
     const id = labels[i];
     if (id > 0) {
-      size[id] += 1;
-      sumGray[id] += gray[i];
+      sizeRaw[id] += 1;
+      sumGrayRaw[id] += gray[i];
+      sumRRaw[id] += origR[i];
+      sumGRaw[id] += origG[i];
+      sumBRaw[id] += origB[i];
     }
   }
 
   const remap = new Int32Array(maxLabel + 1);
   let regionCount = 0;
   for (let id = 1; id <= maxLabel; id += 1) {
-    if (size[id] > 0) {
+    if (sizeRaw[id] > 0) {
       regionCount += 1;
       remap[id] = regionCount;
     }
   }
 
+  const size = new Int32Array(regionCount + 1);
+  const sumGray = new Float64Array(regionCount + 1);
+  const sumR = new Float64Array(regionCount + 1);
+  const sumG = new Float64Array(regionCount + 1);
+  const sumB = new Float64Array(regionCount + 1);
   const meanGray = new Float32Array(regionCount + 1);
-  if (regionCount === 0) {
-    return { regionCount, meanGray };
-  }
 
   for (let id = 1; id <= maxLabel; id += 1) {
     const mapped = remap[id];
     if (!mapped) continue;
-    meanGray[mapped] = sumGray[id] / Math.max(1, size[id]);
+    size[mapped] = sizeRaw[id];
+    sumGray[mapped] = sumGrayRaw[id];
+    sumR[mapped] = sumRRaw[id];
+    sumG[mapped] = sumGRaw[id];
+    sumB[mapped] = sumBRaw[id];
   }
 
   for (let i = 0; i < n; i += 1) {
@@ -814,11 +856,23 @@ function computeRegionStatsAndCompact(labels, gray, width, height, n, maxLabel) 
     if (id > 0) labels[i] = remap[id];
   }
 
-  return { regionCount, meanGray };
+  for (let i = 1; i <= regionCount; i += 1) {
+    meanGray[i] = sumGray[i] / Math.max(1, size[i]);
+  }
+
+  return {
+    regionCount,
+    size,
+    sumGray,
+    sumR,
+    sumG,
+    sumB,
+    meanGray,
+  };
 }
 
-function buildRegionAdjacency(labels, width, height, regionCount) {
-  const adjacency = Array.from({ length: regionCount + 1 }, () => new Set());
+function buildRegionBoundaryGraph(labels, width, height, regionCount) {
+  const adjacency = Array.from({ length: regionCount + 1 }, () => new Map());
 
   for (let y = 0; y < height; y += 1) {
     const row = y * width;
@@ -829,30 +883,222 @@ function buildRegionAdjacency(labels, width, height, regionCount) {
 
       if (x + 1 < width) {
         const b = labels[idx + 1];
-        if (b > 0 && b !== a) {
-          adjacency[a].add(b);
-          adjacency[b].add(a);
-        }
+        if (b > 0 && b !== a) addBoundaryEdge(adjacency, a, b, 1);
       }
-
       if (y + 1 < height) {
         const b = labels[idx + width];
-        if (b > 0 && b !== a) {
-          adjacency[a].add(b);
-          adjacency[b].add(a);
-        }
+        if (b > 0 && b !== a) addBoundaryEdge(adjacency, a, b, 1);
       }
     }
   }
   return adjacency;
 }
 
+function addBoundaryEdge(adjacency, a, b, len) {
+  const ab = adjacency[a].get(b) || 0;
+  const ba = adjacency[b].get(a) || 0;
+  adjacency[a].set(b, ab + len);
+  adjacency[b].set(a, ba + len);
+}
+
+function ragMergeRegions(labels, stats, adjacency, params, width, height) {
+  const started = performance.now();
+  const regionCount = stats.regionCount;
+  if (regionCount <= 1) {
+    return {
+      regionCount,
+      meanGray: stats.meanGray,
+      adjacency,
+      mergeCount: 0,
+      mergeMs: 0,
+    };
+  }
+
+  const parent = new Int32Array(regionCount + 1);
+  const active = new Uint8Array(regionCount + 1);
+  const size = new Int32Array(regionCount + 1);
+  const sumGray = new Float64Array(regionCount + 1);
+  const sumR = new Float64Array(regionCount + 1);
+  const sumG = new Float64Array(regionCount + 1);
+  const sumB = new Float64Array(regionCount + 1);
+
+  for (let i = 1; i <= regionCount; i += 1) {
+    parent[i] = i;
+    active[i] = 1;
+    size[i] = stats.size[i];
+    sumGray[i] = stats.sumGray[i];
+    sumR[i] = stats.sumR[i];
+    sumG[i] = stats.sumG[i];
+    sumB[i] = stats.sumB[i];
+  }
+
+  const keepTarget = clampInt(Math.round((params.ragMergeKeepPercent / 100) * regionCount), 1, regionCount);
+  const plannedMerges = Math.max(0, regionCount - keepTarget);
+  const maxMerges = Math.min(plannedMerges, Math.max(0, Math.round(params.ragMaxMerges)));
+
+  let mergeCount = 0;
+  for (let step = 0; step < maxMerges; step += 1) {
+    let bestA = 0;
+    let bestB = 0;
+    let bestLen = 0;
+    let bestW = Infinity;
+
+    for (let a = 1; a <= regionCount; a += 1) {
+      if (!active[a]) continue;
+      normalizeNeighborMap(a, parent, active, adjacency);
+      const mapA = adjacency[a];
+
+      for (const [b, len] of mapA) {
+        if (a >= b || !active[b]) continue;
+        const w = ragWeight(a, b, len, size, sumGray, sumR, sumG, sumB, params);
+        if (w < bestW) {
+          bestW = w;
+          bestA = a;
+          bestB = b;
+          bestLen = len;
+        }
+      }
+    }
+
+    if (bestA === 0 || bestB === 0 || bestLen <= 0) break;
+
+    let keep = bestA;
+    let remove = bestB;
+    if (size[keep] < size[remove]) {
+      keep = bestB;
+      remove = bestA;
+    }
+
+    mergeRegionPair(keep, remove, parent, active, adjacency, size, sumGray, sumR, sumG, sumB);
+    mergeCount += 1;
+  }
+
+  const rootToCompact = new Int32Array(regionCount + 1);
+  let compactCount = 0;
+  for (let i = 1; i <= regionCount; i += 1) {
+    const r = findRoot(parent, i);
+    if (!active[r]) continue;
+    if (!rootToCompact[r]) {
+      compactCount += 1;
+      rootToCompact[r] = compactCount;
+    }
+  }
+
+  const compactSize = new Int32Array(compactCount + 1);
+  const compactSumGray = new Float64Array(compactCount + 1);
+  for (let r = 1; r <= regionCount; r += 1) {
+    if (!active[r]) continue;
+    const cid = rootToCompact[r];
+    compactSize[cid] = size[r];
+    compactSumGray[cid] = sumGray[r];
+  }
+
+  for (let i = 0; i < labels.length; i += 1) {
+    const id = labels[i];
+    if (id <= 0) continue;
+    const root = findRoot(parent, id);
+    labels[i] = rootToCompact[root];
+  }
+
+  const meanGray = new Float32Array(compactCount + 1);
+  for (let i = 1; i <= compactCount; i += 1) {
+    meanGray[i] = compactSumGray[i] / Math.max(1, compactSize[i]);
+  }
+
+  const compactAdjacency = buildRegionBoundaryGraph(labels, width, height, compactCount);
+  const mergeMs = performance.now() - started;
+  return {
+    regionCount: compactCount,
+    meanGray,
+    adjacency: compactAdjacency,
+    mergeCount,
+    mergeMs,
+  };
+}
+
+function normalizeNeighborMap(root, parent, active, adjacency) {
+  const map = adjacency[root];
+  if (!map || map.size === 0) return;
+
+  const merged = new Map();
+  for (const [nb0, len] of map) {
+    const nb = findRoot(parent, nb0);
+    if (!active[nb] || nb === root) continue;
+    merged.set(nb, (merged.get(nb) || 0) + len);
+  }
+
+  adjacency[root] = merged;
+}
+
+function ragWeight(a, b, boundaryLen, size, sumGray, sumR, sumG, sumB, params) {
+  const invA = 1 / Math.max(1, size[a]);
+  const invB = 1 / Math.max(1, size[b]);
+
+  const gA = sumGray[a] * invA;
+  const gB = sumGray[b] * invB;
+  const grayDiff = Math.abs(gA - gB);
+
+  const rA = sumR[a] * invA;
+  const rB = sumR[b] * invB;
+  const ggA = sumG[a] * invA;
+  const ggB = sumG[b] * invB;
+  const bA = sumB[a] * invA;
+  const bB = sumB[b] * invB;
+  // |Ci - Cj| is treated as average L1 distance in RGB mean color space.
+  const colorDiff = (Math.abs(rA - rB) + Math.abs(ggA - ggB) + Math.abs(bA - bB)) / 3;
+
+  const edgeTerm = params.ragGamma / Math.max(1, boundaryLen);
+  return params.ragAlpha * grayDiff + params.ragBeta * colorDiff + edgeTerm;
+}
+
+function mergeRegionPair(keep, remove, parent, active, adjacency, size, sumGray, sumR, sumG, sumB) {
+  parent[remove] = keep;
+  active[remove] = 0;
+
+  size[keep] += size[remove];
+  sumGray[keep] += sumGray[remove];
+  sumR[keep] += sumR[remove];
+  sumG[keep] += sumG[remove];
+  sumB[keep] += sumB[remove];
+
+  const mapKeep = adjacency[keep];
+  const mapRemove = adjacency[remove];
+
+  for (const [nb0, len] of mapRemove) {
+    const nb = findRoot(parent, nb0);
+    if (!active[nb] || nb === keep) continue;
+
+    mapKeep.set(nb, (mapKeep.get(nb) || 0) + len);
+
+    const mapNb = adjacency[nb];
+    mapNb.set(keep, (mapNb.get(keep) || 0) + len);
+    mapNb.delete(remove);
+  }
+
+  mapKeep.delete(remove);
+  mapRemove.clear();
+}
+
+function findRoot(parent, x) {
+  let r = x;
+  while (parent[r] !== r) r = parent[r];
+  while (parent[x] !== x) {
+    const p = parent[x];
+    parent[x] = r;
+    x = p;
+  }
+  return r;
+}
+
 function computeRegionScore(adjacency, meanGray, regionCount) {
   const score = new Float32Array(regionCount + 1);
   for (let i = 1; i <= regionCount; i += 1) {
     let s = 0;
-    for (const j of adjacency[i]) {
-      s += meanGray[j] - meanGray[i];
+    const map = adjacency[i];
+    if (map) {
+      for (const j of map.keys()) {
+        s += meanGray[j] - meanGray[i];
+      }
     }
     score[i] = s;
   }
