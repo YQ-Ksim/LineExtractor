@@ -168,7 +168,7 @@ function processFrame(id, rawParams, options) {
   const layer2Key = buildLayer2Key(params, state.cache.layer1Key);
   if (layer2Key !== state.cache.layer2Key) {
     const s = performance.now();
-    recomputeK(params);
+    recomputeK();
     layer2Ms = performance.now() - s;
     recomputeLayer2 = true;
     state.cache.layer2Key = layer2Key;
@@ -220,21 +220,17 @@ function processFrame(id, rawParams, options) {
 
 function sanitizeParams(params) {
   const safe = {
-    radius: clampNumber(params.radius, 1, 2000, 36),
+    radius: clampNumber(params.radius, 1, 2000, 160),
     filterType: params.filterType === "ideal" ? "ideal" : "butterworth",
     butterOrder: clampNumber(params.butterOrder, 1, 16, 2),
-    highpassStrength: clampNumber(params.highpassStrength, 0, 10, 1),
-    weightR: clampNumber(params.weightR, 0, 10, 1),
-    weightG: clampNumber(params.weightG, 0, 10, 1),
-    weightB: clampNumber(params.weightB, 0, 10, 1),
-    kScale: clampNumber(params.kScale, 0.01, 100, 1),
-    normalize: Boolean(params.normalize),
-    contrast: clampNumber(params.contrast, 0, 10, 1),
-    threshold: clampNumber(params.threshold, 0, 1, 0.2),
-    clipMin: clampNumber(params.clipMin, 0, 1, 0),
+    highpassStrength: clampNumber(params.highpassStrength, 0, 10, 0.8),
+    normalize: params.normalize === undefined ? true : Boolean(params.normalize),
+    contrast: clampNumber(params.contrast, 0, 10, 0.8),
+    threshold: clampNumber(params.threshold, 0, 1, 0.15),
+    clipMin: clampNumber(params.clipMin, 0, 1, 0.01),
     clipMax: clampNumber(params.clipMax, 0, 1, 1),
     blur: clampNumber(params.blur, 0, 16, 0),
-    sharpen: clampNumber(params.sharpen, 0, 10, 0),
+    sharpen: clampNumber(params.sharpen, 0, 10, 0.35),
   };
 
   if (safe.clipMin > safe.clipMax) {
@@ -253,13 +249,7 @@ function buildLayer1Key(params) {
 }
 
 function buildLayer2Key(params, layer1Key) {
-  return [
-    layer1Key,
-    numberKey(params.weightR),
-    numberKey(params.weightG),
-    numberKey(params.weightB),
-    numberKey(params.kScale),
-  ].join("|");
+  return layer1Key;
 }
 
 function numberKey(value) {
@@ -319,25 +309,21 @@ function applyFilterAndIfft(srcReal, srcImag, outEdge) {
   }
 }
 
-function recomputeK(params) {
+function recomputeK() {
   const { r, g, b } = state.edges;
   const out = state.kBuffer;
   const n = state.totalPix;
-  const wr = params.weightR;
-  const wg = params.weightG;
-  const wb = params.weightB;
-  const kScale = params.kScale;
 
   let min = Infinity;
   let max = -Infinity;
 
   for (let i = 0; i < n; i += 1) {
-    const rv = r[i] * wr;
-    const gv = g[i] * wg;
-    const bv = b[i] * wb;
+    const rv = r[i];
+    const gv = g[i];
+    const bv = b[i];
     const numerator = rv * rv + gv * gv + bv * bv;
     const denominator = 256 * (rv + gv + bv + EPS);
-    const kv = kScale * (numerator / denominator);
+    const kv = numerator / denominator;
     out[i] = kv;
     if (kv < min) min = kv;
     if (kv > max) max = kv;

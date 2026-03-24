@@ -20,21 +20,17 @@ const backendSelect = document.getElementById("backend-select");
 const MAX_IMAGE_DIM = 1024;
 
 const DEFAULT_PARAMS = {
-  radius: 36,
+  radius: 160,
   filterType: "butterworth",
   butterOrder: 2,
-  highpassStrength: 1.0,
-  weightR: 1.0,
-  weightG: 1.0,
-  weightB: 1.0,
-  kScale: 1.0,
+  highpassStrength: 0.8,
   normalize: true,
-  contrast: 1.35,
-  threshold: 0.22,
-  clipMin: 0.0,
+  contrast: 0.8,
+  threshold: 0.15,
+  clipMin: 0.01,
   clipMax: 1.0,
   blur: 0,
-  sharpen: 0.0,
+  sharpen: 0.35,
 };
 
 const CONTROL_SCHEMA = [
@@ -56,15 +52,6 @@ const CONTROL_SCHEMA = [
     ],
   },
   {
-    title: "K Algorithm 参数",
-    controls: [
-      { key: "weightR", label: "R 权重", type: "range", min: 0, max: 2, step: 0.01 },
-      { key: "weightG", label: "G 权重", type: "range", min: 0, max: 2, step: 0.01 },
-      { key: "weightB", label: "B 权重", type: "range", min: 0, max: 2, step: 0.01 },
-      { key: "kScale", label: "K Scale", type: "range", min: 0.1, max: 5, step: 0.05 },
-    ],
-  },
-  {
     title: "Post Processing 参数",
     controls: [
       { key: "normalize", label: "Normalize", type: "checkbox" },
@@ -82,7 +69,7 @@ const params = { ...DEFAULT_PARAMS };
 const bindings = new Map();
 
 const LAYER1_KEYS = new Set(["radius", "filterType", "butterOrder", "highpassStrength"]);
-const LAYER2_KEYS = new Set(["weightR", "weightG", "weightB", "kScale"]);
+const LAYER2_KEYS = new Set();
 
 let isImageReady = false;
 let hasResult = false;
