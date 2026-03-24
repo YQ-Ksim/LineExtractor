@@ -34,6 +34,8 @@ const DEFAULT_PARAMS = {
   regionBinarize: false,
   regionTopPercent: 32,
   segLineThreshold: 0.55,
+  segLineDenoiseRadius: 1,
+  segLineMinArea: 6,
   segDilateRadius: 1,
   segSeedSpacing: 8,
   segSeedMinDist: 1.2,
@@ -74,7 +76,9 @@ const CONTROL_SCHEMA = [
     controls: [
       { key: "regionBinarize", label: "启用区域排序二值化", type: "checkbox" },
       { key: "regionTopPercent", label: "Top p% 设黑", type: "range", min: 1, max: 99, step: 1 },
-      { key: "segLineThreshold", label: "白线阈值", type: "range", min: 0.05, max: 0.95, step: 0.01 },
+      { key: "segLineThreshold", label: "分割前白线二值阈值", type: "range", min: 0.05, max: 0.95, step: 0.01 },
+      { key: "segLineDenoiseRadius", label: "线稿降噪半径", type: "range", min: 0, max: 3, step: 1 },
+      { key: "segLineMinArea", label: "最小线连通面积", type: "range", min: 0, max: 64, step: 1 },
       { key: "segDilateRadius", label: "线稿膨胀半径", type: "range", min: 0, max: 4, step: 1 },
       { key: "segSeedSpacing", label: "种子网格间距", type: "range", min: 2, max: 24, step: 1 },
       { key: "segSeedMinDist", label: "最小种子距离", type: "range", min: 0.1, max: 6, step: 0.1 },
@@ -87,6 +91,8 @@ const bindings = new Map();
 const REGION_DETAIL_KEYS = new Set([
   "regionTopPercent",
   "segLineThreshold",
+  "segLineDenoiseRadius",
+  "segLineMinArea",
   "segDilateRadius",
   "segSeedSpacing",
   "segSeedMinDist",

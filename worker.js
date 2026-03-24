@@ -257,6 +257,8 @@ function sanitizeParams(params) {
     regionBinarize: Boolean(params.regionBinarize),
     regionTopPercent: clampNumber(params.regionTopPercent, 1, 99, 32),
     segLineThreshold: clampNumber(params.segLineThreshold, 0.01, 0.99, 0.55),
+    segLineDenoiseRadius: clampNumber(params.segLineDenoiseRadius, 0, 8, 1),
+    segLineMinArea: clampNumber(params.segLineMinArea, 0, 4096, 6),
     segDilateRadius: clampNumber(params.segDilateRadius, 0, 8, 1),
     segSeedSpacing: clampNumber(params.segSeedSpacing, 2, 64, 8),
     segSeedMinDist: clampNumber(params.segSeedMinDist, 0, 64, 1.2),
@@ -405,6 +407,16 @@ function lineGuidedRegionBinarize(tone, params) {
   // Layer3 line sketch is "black background + white lines",
   // so white pixels are treated as segmentation barriers.
   buildLineMask(tone, seg.lineMask, params.segLineThreshold, n);
+  const denoiseRadius = Math.round(params.segLineDenoiseRadius);
+  if (denoiseRadius > 0) {
+    // Opening removes isolated white speckles before segmentation.
+    erodeBinary(seg.lineMask, seg.barrier, seg.tempU8, width, height, denoiseRadius);
+    dilateBinary(seg.barrier, seg.lineMask, seg.tempU8, width, height, denoiseRadius);
+  }
+  const minLineArea = Math.max(0, Math.round(params.segLineMinArea));
+  if (minLineArea > 1) {
+    removeSmallBinaryComponents(seg.lineMask, width, height, minLineArea, seg.queue, seg.visited);
+  }
   dilateBinary(seg.lineMask, seg.barrier, seg.tempU8, width, height, Math.round(params.segDilateRadius));
   computeChamferDistance(seg.barrier, seg.dist, width, height, n);
 
@@ -450,6 +462,42 @@ function buildLineMask(tone, outMask, lineThreshold, n) {
   }
 }
 
+function erodeBinary(src, dst, temp, width, height, radius) {
+  if (radius <= 0) {
+    dst.set(src);
+    return;
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      let v = 1;
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const xx = clampInt(x + dx, 0, width - 1);
+        if (!src[row + xx]) {
+          v = 0;
+          break;
+        }
+      }
+      temp[row + x] = v;
+    }
+  }
+
+  for (let x = 0; x < width; x += 1) {
+    for (let y = 0; y < height; y += 1) {
+      let v = 1;
+      for (let dy = -radius; dy <= radius; dy += 1) {
+        const yy = clampInt(y + dy, 0, height - 1);
+        if (!temp[yy * width + x]) {
+          v = 0;
+          break;
+        }
+      }
+      dst[y * width + x] = v;
+    }
+  }
+}
+
 function dilateBinary(src, dst, temp, width, height, radius) {
   if (radius <= 0) {
     dst.set(src);
@@ -482,6 +530,47 @@ function dilateBinary(src, dst, temp, width, height, radius) {
         }
       }
       dst[y * width + x] = v;
+    }
+  }
+}
+
+function removeSmallBinaryComponents(mask, width, height, minArea, queue, visited) {
+  const n = mask.length;
+  visited.fill(0);
+
+  for (let start = 0; start < n; start += 1) {
+    if (!mask[start] || visited[start]) continue;
+
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = start;
+    visited[start] = 1;
+
+    while (head < tail) {
+      const idx = queue[head++];
+      const x = idx % width;
+      const y = (idx / width) | 0;
+
+      for (let oy = -1; oy <= 1; oy += 1) {
+        const ny = y + oy;
+        if (ny < 0 || ny >= height) continue;
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (ox === 0 && oy === 0) continue;
+          const nx = x + ox;
+          if (nx < 0 || nx >= width) continue;
+          const nb = ny * width + nx;
+          if (mask[nb] && !visited[nb]) {
+            visited[nb] = 1;
+            queue[tail++] = nb;
+          }
+        }
+      }
+    }
+
+    if (tail < minArea) {
+      for (let i = 0; i < tail; i += 1) {
+        mask[queue[i]] = 0;
+      }
     }
   }
 }
