@@ -1,6 +1,7 @@
 import { HybridGpuRenderer } from "./gpu_renderer.js";
 
-const worker = new Worker("./worker.js", { type: "module" });
+const APP_VERSION = "20260325-6";
+const worker = new Worker(`./worker.js?v=${APP_VERSION}`, { type: "module" });
 const gpuRenderer = new HybridGpuRenderer();
 
 const sourceCanvas = document.getElementById("source-canvas");
@@ -33,17 +34,29 @@ const DEFAULT_PARAMS = {
   sharpen: 0.35,
   regionBinarize: false,
   regionTopPercent: 32,
+  rankVoteWeight: 0.7,
+  rankGrayWeight: 0.3,
+  regionMergeEnabled: true,
+  regionMergeStrength: 1.0,
+  regionMergePasses: 2,
   segLineThreshold: 0.55,
   segLineDenoiseRadius: 1,
   segLineMinArea: 6,
   segDilateRadius: 1,
-  segSeedSpacing: 8,
-  segSeedMinDist: 1.2,
-  ragMergeKeepPercent: 40,
-  ragAlpha: 1.0,
-  ragBeta: 0.8,
-  ragGamma: 2.0,
-  ragMaxMerges: 1200,
+  useWatershedInit: false,
+  wsSeedSpacing: 4,
+  wsSeedMinDist: 0.8,
+  felzK: 220,
+  felzMinSize: 48,
+  linePenalty: 1000,
+  multiScaleEnabled: false,
+  multiScaleKFactor: 2.2,
+  multiScaleMinFactor: 2.0,
+  crfEnabled: false,
+  crfIters: 2,
+  crfUnaryWeight: 2.0,
+  crfPairWeight: 1.2,
+  crfColorSigma: 24,
 };
 
 const CONTROL_SCHEMA = [
@@ -81,17 +94,29 @@ const CONTROL_SCHEMA = [
     controls: [
       { key: "regionBinarize", label: "启用区域排序二值化", type: "checkbox" },
       { key: "regionTopPercent", label: "Top p% 设黑", type: "range", min: 1, max: 99, step: 1 },
+      { key: "rankVoteWeight", label: "Vote Score Weight", type: "range", min: 0, max: 1, step: 0.01 },
+      { key: "rankGrayWeight", label: "Gray Rank Weight", type: "range", min: 0, max: 1, step: 0.01 },
+      { key: "regionMergeEnabled", label: "Merge Similar Small Regions", type: "checkbox" },
+      { key: "regionMergeStrength", label: "Merge Strength", type: "range", min: 0, max: 2, step: 0.05 },
+      { key: "regionMergePasses", label: "Merge Passes", type: "range", min: 1, max: 4, step: 1 },
       { key: "segLineThreshold", label: "分割前白线二值阈值", type: "range", min: 0.05, max: 0.95, step: 0.01 },
       { key: "segLineDenoiseRadius", label: "线稿降噪半径", type: "range", min: 0, max: 3, step: 1 },
       { key: "segLineMinArea", label: "最小线连通面积", type: "range", min: 0, max: 64, step: 1 },
       { key: "segDilateRadius", label: "线稿膨胀半径", type: "range", min: 0, max: 4, step: 1 },
-      { key: "segSeedSpacing", label: "种子网格间距", type: "range", min: 2, max: 24, step: 1 },
-      { key: "segSeedMinDist", label: "最小种子距离", type: "range", min: 0.1, max: 6, step: 0.1 },
-      { key: "ragMergeKeepPercent", label: "合并后保留区域%", type: "range", min: 5, max: 100, step: 1 },
-      { key: "ragAlpha", label: "α 灰度权重", type: "range", min: 0, max: 4, step: 0.05 },
-      { key: "ragBeta", label: "β 颜色权重", type: "range", min: 0, max: 4, step: 0.05 },
-      { key: "ragGamma", label: "γ 边界权重", type: "range", min: 0, max: 20, step: 0.1 },
-      { key: "ragMaxMerges", label: "最大合并步数", type: "range", min: 0, max: 5000, step: 10 },
+      { key: "useWatershedInit", label: "Watershed 初分割", type: "checkbox" },
+      { key: "wsSeedSpacing", label: "Watershed 种子间距", type: "range", min: 2, max: 24, step: 1 },
+      { key: "wsSeedMinDist", label: "Watershed 最小种距", type: "range", min: 0.1, max: 6, step: 0.1 },
+      { key: "felzK", label: "Felzenszwalb k", type: "range", min: 1, max: 1000, step: 1 },
+      { key: "felzMinSize", label: "最小区域大小", type: "range", min: 0, max: 2000, step: 1 },
+      { key: "linePenalty", label: "线稿约束 λ", type: "range", min: 0, max: 2000, step: 1 },
+      { key: "multiScaleEnabled", label: "多尺度融合", type: "checkbox" },
+      { key: "multiScaleKFactor", label: "粗尺度 k 倍率", type: "range", min: 1, max: 6, step: 0.1 },
+      { key: "multiScaleMinFactor", label: "粗尺度 min 倍率", type: "range", min: 1, max: 6, step: 0.1 },
+      { key: "crfEnabled", label: "CRF 细化", type: "checkbox" },
+      { key: "crfIters", label: "CRF 迭代", type: "range", min: 0, max: 6, step: 1 },
+      { key: "crfUnaryWeight", label: "CRF Unary 权重", type: "range", min: 0, max: 6, step: 0.1 },
+      { key: "crfPairWeight", label: "CRF Pair 权重", type: "range", min: 0, max: 6, step: 0.1 },
+      { key: "crfColorSigma", label: "CRF 颜色 Sigma", type: "range", min: 1, max: 80, step: 1 },
     ],
   },
 ];
@@ -100,17 +125,29 @@ const params = { ...DEFAULT_PARAMS };
 const bindings = new Map();
 const REGION_DETAIL_KEYS = new Set([
   "regionTopPercent",
+  "rankVoteWeight",
+  "rankGrayWeight",
+  "regionMergeEnabled",
+  "regionMergeStrength",
+  "regionMergePasses",
   "segLineThreshold",
   "segLineDenoiseRadius",
   "segLineMinArea",
   "segDilateRadius",
-  "segSeedSpacing",
-  "segSeedMinDist",
-  "ragMergeKeepPercent",
-  "ragAlpha",
-  "ragBeta",
-  "ragGamma",
-  "ragMaxMerges",
+  "useWatershedInit",
+  "wsSeedSpacing",
+  "wsSeedMinDist",
+  "felzK",
+  "felzMinSize",
+  "linePenalty",
+  "multiScaleEnabled",
+  "multiScaleKFactor",
+  "multiScaleMinFactor",
+  "crfEnabled",
+  "crfIters",
+  "crfUnaryWeight",
+  "crfPairWeight",
+  "crfColorSigma",
 ]);
 
 const LAYER1_KEYS = new Set(["radius", "filterType", "butterOrder", "highpassStrength"]);
@@ -192,7 +229,11 @@ worker.onmessage = (event) => {
         ` | 重算 ${layers.join(" + ")} | 总耗时 ${message.stats.totalMs.toFixed(1)}ms` +
         ` (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms,` +
         ` L3 ${message.stats.layer3Ms.toFixed(1)}ms, Region ${message.stats.regionMs.toFixed(1)}ms` +
-        `${params.regionBinarize ? `, RAG ${message.stats.ragMs.toFixed(1)}ms/${message.stats.ragMerges} merges` : ""}` +
+        `${
+          params.regionBinarize
+            ? `, Felz ${message.stats.felzMs.toFixed(1)}ms, E=${message.stats.felzEdgeCount}, R=${message.stats.felzInitialRegions}->${message.stats.felzFinalRegions}, Ws ${message.stats.watershedMs.toFixed(1)}ms, Merge ${message.stats.mergeMs.toFixed(1)}ms, Fuse ${message.stats.fusionMs.toFixed(1)}ms, CRF ${message.stats.crfMs.toFixed(1)}ms`
+            : ""
+        }` +
         `${renderedBy !== "CPU" ? `, GPU ${gpuMs.toFixed(1)}ms` : ""})`
     );
     return;
@@ -266,7 +307,8 @@ function createControlRow(control) {
     input.id = `input-${control.key}`;
     input.addEventListener("input", () => {
       params[control.key] = Number(input.value);
-      value.textContent = formatValue(params[control.key], control.step);
+      enforceRankWeightSum(control.key);
+      updateControlValue(control.key);
       guardClipBounds(control.key);
       updateDynamicControlState();
       requestRender(control.key);
@@ -445,7 +487,7 @@ function requestRender(changedKey = "", force = false) {
     forceKMapSync = false;
 
     if (params.regionBinarize) {
-      setStatus("正在执行线稿引导区域分割与排序二值化...");
+      setStatus("正在执行 Watershed + 多尺度 Felzenszwalb + CRF 区域二值化...");
     } else if (useGpu) {
       setStatus("正在计算 Layer1/Layer2，Layer3 由 GPU 渲染...");
     } else {
@@ -499,6 +541,13 @@ function exportPng() {
 }
 
 function updateDynamicControlState() {
+  const setEnabled = (key, enabled) => {
+    const binding = bindings.get(key);
+    if (!binding?.input) return;
+    binding.input.disabled = !enabled;
+    if (binding.row) binding.row.style.opacity = enabled ? "1" : "0.45";
+  };
+
   const orderBinding = bindings.get("butterOrder");
   const isButterworth = params.filterType === "butterworth";
   if (orderBinding?.input) {
@@ -507,11 +556,34 @@ function updateDynamicControlState() {
   }
 
   for (const key of REGION_DETAIL_KEYS) {
-    const binding = bindings.get(key);
-    if (!binding?.input) continue;
-    binding.input.disabled = !params.regionBinarize;
-    if (binding.row) binding.row.style.opacity = params.regionBinarize ? "1" : "0.45";
+    setEnabled(key, params.regionBinarize);
   }
+
+  setEnabled("wsSeedSpacing", params.regionBinarize && params.useWatershedInit);
+  setEnabled("wsSeedMinDist", params.regionBinarize && params.useWatershedInit);
+
+  setEnabled("regionMergeStrength", params.regionBinarize && params.regionMergeEnabled);
+  setEnabled("regionMergePasses", params.regionBinarize && params.regionMergeEnabled);
+
+  setEnabled("multiScaleKFactor", params.regionBinarize && params.multiScaleEnabled);
+  setEnabled("multiScaleMinFactor", params.regionBinarize && params.multiScaleEnabled);
+
+  setEnabled("crfIters", params.regionBinarize && params.crfEnabled);
+  setEnabled("crfUnaryWeight", params.regionBinarize && params.crfEnabled);
+  setEnabled("crfPairWeight", params.regionBinarize && params.crfEnabled);
+  setEnabled("crfColorSigma", params.regionBinarize && params.crfEnabled);
+}
+
+function enforceRankWeightSum(changedKey) {
+  if (changedKey !== "rankVoteWeight" && changedKey !== "rankGrayWeight") return;
+
+  const own = clamp01Number(params[changedKey]);
+  const normalized = Math.round(own * 100) / 100;
+  params[changedKey] = normalized;
+
+  const otherKey = changedKey === "rankVoteWeight" ? "rankGrayWeight" : "rankVoteWeight";
+  params[otherKey] = Math.round((1 - normalized) * 100) / 100;
+  updateControlValue(otherKey);
 }
 
 function guardClipBounds(changedKey) {
@@ -555,6 +627,14 @@ function formatValue(value, step = 1) {
   if (step >= 1) return String(Math.round(n));
   const decimals = Math.max(0, String(step).split(".")[1]?.length ?? 0);
   return n.toFixed(Math.min(decimals, 3));
+}
+
+function clamp01Number(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
 }
 
 function fitSize(width, height, maxDim) {
