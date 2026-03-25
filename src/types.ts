@@ -15,6 +15,7 @@ export interface AppParams {
   blur: number;
   sharpen: number;
   regionBinarize: boolean;
+  embedSketchLines: boolean;
   regionTopPercent: number;
   rankVoteWeight: number;
   rankGrayWeight: number;
@@ -156,3 +157,4 @@ export interface GpuInitResult {
   backend: BackendKind;
   reason: string;
 }
+

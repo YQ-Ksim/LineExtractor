@@ -321,6 +321,7 @@ function sanitizeParams(params) {
         blur: clampNumber(params.blur, 0, 16, 0),
         sharpen: clampNumber(params.sharpen, 0, 10, 0.35),
         regionBinarize: Boolean(params.regionBinarize),
+        embedSketchLines: params.embedSketchLines === undefined ? false : Boolean(params.embedSketchLines),
         regionTopPercent: clampNumber(params.regionTopPercent, 1, 99, 32),
         rankVoteWeight: clampNumber(params.rankVoteWeight, 0, 5, 0.7),
         rankGrayWeight: clampNumber(params.rankGrayWeight, 0, 5, 0.3),
@@ -535,6 +536,9 @@ function lineGuidedRegionBinarize(tone, params, toneKey) {
         out[base + 2] = c;
         out[base + 3] = 255;
     }
+    if (params.embedSketchLines) {
+        applyAdaptiveLineTextureToOutput(out, seg.lineMask, barrier, seg.crfA, width, height);
+    }
     return {
         image: out,
         felzMs: cache.stats.felzMs,
@@ -547,6 +551,73 @@ function lineGuidedRegionBinarize(tone, params, toneKey) {
         crfMs,
         cacheHit,
     };
+}
+function applyAdaptiveLineTextureToOutput(out, lineMask, barrier, binaryMask, width, height) {
+    const n = width * height;
+    let globalBlack = 0;
+    let globalWhite = 0;
+    for (let i = 0; i < n; i += 1) {
+        const isLine = barrier[i] || lineMask[i];
+        if (isLine)
+            continue;
+        const isBlack = !barrier[i] && binaryMask[i] >= 0.5;
+        if (isBlack)
+            globalBlack += 1;
+        else
+            globalWhite += 1;
+    }
+    const preferBlackLine = globalWhite >= globalBlack;
+    const radius = 2;
+    for (let y = 0; y < height; y += 1) {
+        const row = y * width;
+        for (let x = 0; x < width; x += 1) {
+            const idx = row + x;
+            const isLine = barrier[idx] || lineMask[idx];
+            if (!isLine)
+                continue;
+            let blackCount = 0;
+            let whiteCount = 0;
+            for (let oy = -radius; oy <= radius; oy += 1) {
+                const ny = y + oy;
+                if (ny < 0 || ny >= height)
+                    continue;
+                for (let ox = -radius; ox <= radius; ox += 1) {
+                    if (ox === 0 && oy === 0)
+                        continue;
+                    const nx = x + ox;
+                    if (nx < 0 || nx >= width)
+                        continue;
+                    const nb = ny * width + nx;
+                    const nbIsLine = barrier[nb] || lineMask[nb];
+                    if (nbIsLine)
+                        continue;
+                    const isBlack = !barrier[nb] && binaryMask[nb] >= 0.5;
+                    if (isBlack)
+                        blackCount += 1;
+                    else
+                        whiteCount += 1;
+                }
+            }
+            let lineIsBlack;
+            if (blackCount > whiteCount) {
+                // Near black-dominant area: render white line for contrast.
+                lineIsBlack = false;
+            }
+            else if (whiteCount > blackCount) {
+                // Near white-dominant area: render black line for contrast.
+                lineIsBlack = true;
+            }
+            else {
+                lineIsBlack = preferBlackLine;
+            }
+            const c = lineIsBlack ? 0 : 255;
+            const base = idx * 4;
+            out[base] = c;
+            out[base + 1] = c;
+            out[base + 2] = c;
+            out[base + 3] = 255;
+        }
+    }
 }
 function buildRegionStructureKey(toneKey, params) {
     return [

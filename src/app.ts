@@ -31,6 +31,7 @@ const DEFAULT_PARAMS: AppParams = {
   blur: 0,
   sharpen: 0.35,
   regionBinarize: false,
+  embedSketchLines: false,
   regionTopPercent: 32,
   rankVoteWeight: 0.7,
   rankGrayWeight: 0.3,
@@ -91,6 +92,7 @@ const CONTROL_SCHEMA: ControlGroupDef[] = [
     title: "Line-guided Region Binarization",
     controls: [
       { key: "regionBinarize", label: "Enable Region Binarization", type: "checkbox" },
+      { key: "embedSketchLines", label: "Embed Sketch Lines", type: "checkbox" },
       { key: "regionTopPercent", label: "Top p% As Black", type: "range", min: 1, max: 99, step: 1 },
       { key: "rankVoteWeight", label: "Vote Score Weight", type: "range", min: 0, max: 1, step: 0.01 },
       { key: "rankGrayWeight", label: "Gray Rank Weight", type: "range", min: 0, max: 1, step: 0.01 },
@@ -137,6 +139,7 @@ const CONTROL_LABELS: Record<Locale, Partial<Record<ControlKey, string>>> = {
     blur: "模糊",
     sharpen: "锐化",
     regionBinarize: "启用区域二值化",
+    embedSketchLines: "嵌入线稿纹理",
     regionTopPercent: "前 p% 设为黑",
     rankVoteWeight: "投票分数权重",
     rankGrayWeight: "灰度排名权重",
@@ -283,6 +286,7 @@ const bindings = new Map<ControlKey, ControlBinding>();
 const LAYER1_KEYS = new Set<ControlKey>(["radius", "filterType", "butterOrder", "highpassStrength"]);
 const LAYER2_KEYS = new Set<ControlKey>();
 const REGION_DETAIL_KEYS = new Set<ControlKey>([
+  "embedSketchLines",
   "regionTopPercent",
   "rankVoteWeight",
   "rankGrayWeight",
@@ -1007,6 +1011,10 @@ function getRequired2DContext(canvas: HTMLCanvasElement, willReadFrequently: boo
   if (!ctx) throw new Error("Failed to create 2D canvas context.");
   return ctx;
 }
+
+
+
+
 
 
 
