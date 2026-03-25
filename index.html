@@ -1,32 +1,34 @@
-<!doctype html>
-<html lang="zh-CN">
+﻿<!doctype html>
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LineExtractor</title>
-    <link rel="stylesheet" href="./styles.css?v=20260325-6" />
+    <link rel="stylesheet" href="./styles.css?v=20260325-8" />
   </head>
   <body>
     <div class="bg-orb orb-a"></div>
     <div class="bg-orb orb-b"></div>
+
     <main class="app-shell">
       <header class="app-header">
         <div>
-          <h1>LineExtractor</h1>
-          <p>纯前端计算：频域线稿 + 线稿引导区域分割</p>
+          <h1 id="app-title">LineExtractor</h1>
+          <p id="app-subtitle">Pure frontend pipeline: Frequency-domain line extraction + line-guided region binarization</p>
         </div>
 
         <div class="toolbar">
           <label class="btn upload-btn">
-            导入图片
+            <span id="import-label">Import Image</span>
             <input id="file-input" type="file" accept="image/*" />
           </label>
-          <button id="load-demo" class="btn btn-secondary" type="button">加载 test.jpg</button>
-          <button id="export-png" class="btn btn-secondary" type="button">导出 PNG</button>
-          <button id="reset-params" class="btn btn-secondary" type="button">重置参数</button>
+          <button id="load-demo" class="btn btn-secondary" type="button">Load test.jpg</button>
+          <button id="export-png" class="btn btn-secondary" type="button">Export PNG</button>
+          <button id="reset-params" class="btn btn-secondary" type="button">Reset Parameters</button>
+          <button id="lang-toggle" class="btn btn-secondary" type="button">中文</button>
 
           <label class="backend-pick" for="backend-select">
-            渲染后端
+            <span id="backend-label">Render Backend</span>
             <select id="backend-select">
               <option value="auto">Auto (WebGPU &gt; WebGL2 &gt; CPU)</option>
               <option value="webgpu">WebGPU</option>
@@ -43,20 +45,20 @@
         <section class="panel preview">
           <div class="canvas-grid">
             <figure>
-              <figcaption>原图</figcaption>
+              <figcaption id="source-caption">Source</figcaption>
               <canvas id="source-canvas"></canvas>
             </figure>
             <figure>
-              <figcaption>输出</figcaption>
+              <figcaption id="output-caption">Output</figcaption>
               <canvas id="result-canvas"></canvas>
             </figure>
           </div>
         </section>
       </section>
 
-      <footer id="status" class="status">等待加载图片...</footer>
+      <footer id="status" class="status">Waiting for image...</footer>
     </main>
 
-    <script type="module" src="./app.js?v=20260325-6"></script>
+    <script type="module" src="./app.js?v=20260325-8"></script>
   </body>
 </html>

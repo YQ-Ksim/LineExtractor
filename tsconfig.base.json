@@ -1,0 +1,14 @@
+﻿{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "strict": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "allowJs": false,
+    "sourceMap": false,
+    "declaration": false,
+    "newLine": "lf"
+  }
+}

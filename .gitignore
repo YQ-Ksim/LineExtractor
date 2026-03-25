@@ -1,0 +1,6 @@
+﻿node_modules/
+build/
+.npm-cache/
+
+# Optional local files
+*.log
