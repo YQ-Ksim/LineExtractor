@@ -284,6 +284,10 @@ let backendPreference = readBackendPreference(backendSelect.value);
 let activeBackend = "cpu";
 let backendToken = 0;
 let forceKMapSync = true;
+let workerInFlight = false;
+let workerActiveRequestId = 0;
+let queuedRenderPending = false;
+let queuedRenderForce = false;
 applyLocaleTexts(false);
 buildControls();
 bindEvents();
@@ -299,7 +303,9 @@ worker.addEventListener("message", (event) => {
         return;
     }
     if (message.type === "error") {
+        workerInFlight = false;
         setStatus(`${ui().status.processingFailed}: ${message.message}`);
+        scheduleQueuedRenderIfNeeded();
     }
 });
 function ui() {
@@ -379,8 +385,13 @@ function handleImageReady(message) {
     requestRender("", true);
 }
 function handleWorkerResult(message) {
-    if (message.id < lastResultId)
+    if (message.id === workerActiveRequestId) {
+        workerInFlight = false;
+    }
+    if (message.id < lastResultId) {
+        scheduleQueuedRenderIfNeeded();
         return;
+    }
     lastResultId = message.id;
     if (message.kMapBuffer) {
         const kMap = new Float32Array(message.kMapBuffer);
@@ -433,6 +444,7 @@ function handleWorkerResult(message) {
     else {
         setStatus(`Done | mode ${modeText} | backend ${renderedBy.toUpperCase()} | recompute ${layers.join(" + ")} | total ${message.stats.totalMs.toFixed(1)}ms (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms, L3 ${message.stats.layer3Ms.toFixed(1)}ms, Region ${message.stats.regionMs.toFixed(1)}ms${regionPart}${renderedBy !== "cpu" ? `, GPU ${gpuMs.toFixed(1)}ms` : ""})`);
     }
+    scheduleQueuedRenderIfNeeded();
 }
 function buildControls() {
     const frag = document.createDocumentFragment();
@@ -608,6 +620,10 @@ function initWorkerImage() {
     isImageReady = false;
     hasResult = false;
     forceKMapSync = true;
+    workerInFlight = false;
+    workerActiveRequestId = 0;
+    queuedRenderPending = false;
+    queuedRenderForce = false;
     gpuRenderer.resetKMap();
     setStatus(ui().status.initFrequency);
     const message = {
@@ -617,6 +633,41 @@ function initWorkerImage() {
         data: imageData.data.buffer,
     };
     worker.postMessage(message, [imageData.data.buffer]);
+}
+function dispatchWorkerRender(force) {
+    requestId += 1;
+    const useGpu = !params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady();
+    const message = {
+        type: "process",
+        id: requestId,
+        params: { ...params },
+        options: {
+            needRgba: !useGpu || params.regionBinarize,
+            needKMap: useGpu,
+            forceKMap: forceKMapSync || force,
+        },
+    };
+    workerInFlight = true;
+    workerActiveRequestId = requestId;
+    worker.postMessage(message);
+    forceKMapSync = false;
+    if (params.regionBinarize) {
+        setStatus(ui().status.processingRegion);
+    }
+    else if (useGpu) {
+        setStatus(ui().status.processingGpu);
+    }
+    else {
+        setStatus(ui().status.processingGeneric);
+    }
+}
+function scheduleQueuedRenderIfNeeded() {
+    if (!queuedRenderPending || workerInFlight || !isImageReady)
+        return;
+    const nextForce = queuedRenderForce;
+    queuedRenderPending = false;
+    queuedRenderForce = false;
+    requestRender("", nextForce);
 }
 function requestRender(changedKey = "", force = false) {
     if (!isImageReady)
@@ -641,29 +692,12 @@ function requestRender(changedKey = "", force = false) {
             setStatus(`${ui().status.localGpuDone} | Layer3 | ${gpuMs.toFixed(1)}ms`);
             return;
         }
-        requestId += 1;
-        const useGpu = !params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady();
-        const message = {
-            type: "process",
-            id: requestId,
-            params: { ...params },
-            options: {
-                needRgba: !useGpu || params.regionBinarize,
-                needKMap: useGpu,
-                forceKMap: forceKMapSync,
-            },
-        };
-        worker.postMessage(message);
-        forceKMapSync = false;
-        if (params.regionBinarize) {
-            setStatus(ui().status.processingRegion);
+        if (workerInFlight) {
+            queuedRenderPending = true;
+            queuedRenderForce = queuedRenderForce || force;
+            return;
         }
-        else if (useGpu) {
-            setStatus(ui().status.processingGpu);
-        }
-        else {
-            setStatus(ui().status.processingGeneric);
-        }
+        dispatchWorkerRender(force);
     }, delay);
 }
 function pickDelay(changedKey) {

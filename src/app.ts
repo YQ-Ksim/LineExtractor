@@ -319,6 +319,10 @@ let backendPreference: BackendPreference = readBackendPreference(backendSelect.v
 let activeBackend: BackendKind = "cpu";
 let backendToken = 0;
 let forceKMapSync = true;
+let workerInFlight = false;
+let workerActiveRequestId = 0;
+let queuedRenderPending = false;
+let queuedRenderForce = false;
 
 applyLocaleTexts(false);
 buildControls();
@@ -339,7 +343,9 @@ worker.addEventListener("message", (event: MessageEvent<FromWorkerMessage>) => {
   }
 
   if (message.type === "error") {
+    workerInFlight = false;
     setStatus(`${ui().status.processingFailed}: ${message.message}`);
+    scheduleQueuedRenderIfNeeded();
   }
 });
 
@@ -431,7 +437,14 @@ function handleImageReady(message: Extract<FromWorkerMessage, { type: "imageRead
 }
 
 function handleWorkerResult(message: WorkerResultMessage): void {
-  if (message.id < lastResultId) return;
+  if (message.id === workerActiveRequestId) {
+    workerInFlight = false;
+  }
+
+  if (message.id < lastResultId) {
+    scheduleQueuedRenderIfNeeded();
+    return;
+  }
   lastResultId = message.id;
 
   if (message.kMapBuffer) {
@@ -489,6 +502,8 @@ function handleWorkerResult(message: WorkerResultMessage): void {
       `Done | mode ${modeText} | backend ${renderedBy.toUpperCase()} | recompute ${layers.join(" + ")} | total ${message.stats.totalMs.toFixed(1)}ms (L1 ${message.stats.layer1Ms.toFixed(1)}ms, L2 ${message.stats.layer2Ms.toFixed(1)}ms, L3 ${message.stats.layer3Ms.toFixed(1)}ms, Region ${message.stats.regionMs.toFixed(1)}ms${regionPart}${renderedBy !== "cpu" ? `, GPU ${gpuMs.toFixed(1)}ms` : ""})`
     );
   }
+
+  scheduleQueuedRenderIfNeeded();
 }
 
 function buildControls(): void {
@@ -697,6 +712,10 @@ function initWorkerImage(): void {
   isImageReady = false;
   hasResult = false;
   forceKMapSync = true;
+  workerInFlight = false;
+  workerActiveRequestId = 0;
+  queuedRenderPending = false;
+  queuedRenderForce = false;
   gpuRenderer.resetKMap();
   setStatus(ui().status.initFrequency);
 
@@ -709,6 +728,43 @@ function initWorkerImage(): void {
   worker.postMessage(message, [imageData.data.buffer]);
 }
 
+
+function dispatchWorkerRender(force: boolean): void {
+  requestId += 1;
+  const useGpu = !params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady();
+
+  const message: WorkerProcessMessage = {
+    type: "process",
+    id: requestId,
+    params: { ...params },
+    options: {
+      needRgba: !useGpu || params.regionBinarize,
+      needKMap: useGpu,
+      forceKMap: forceKMapSync || force,
+    },
+  };
+
+  workerInFlight = true;
+  workerActiveRequestId = requestId;
+  worker.postMessage(message);
+  forceKMapSync = false;
+
+  if (params.regionBinarize) {
+    setStatus(ui().status.processingRegion);
+  } else if (useGpu) {
+    setStatus(ui().status.processingGpu);
+  } else {
+    setStatus(ui().status.processingGeneric);
+  }
+}
+
+function scheduleQueuedRenderIfNeeded(): void {
+  if (!queuedRenderPending || workerInFlight || !isImageReady) return;
+  const nextForce = queuedRenderForce;
+  queuedRenderPending = false;
+  queuedRenderForce = false;
+  requestRender("", nextForce);
+}
 function requestRender(changedKey: ControlKey | "" = "", force = false): void {
   if (!isImageReady) return;
   if (renderTimer !== null) window.clearTimeout(renderTimer);
@@ -735,29 +791,13 @@ function requestRender(changedKey: ControlKey | "" = "", force = false): void {
       return;
     }
 
-    requestId += 1;
-    const useGpu = !params.regionBinarize && activeBackend !== "cpu" && gpuRenderer.isReady();
-
-    const message: WorkerProcessMessage = {
-      type: "process",
-      id: requestId,
-      params: { ...params },
-      options: {
-        needRgba: !useGpu || params.regionBinarize,
-        needKMap: useGpu,
-        forceKMap: forceKMapSync,
-      },
-    };
-    worker.postMessage(message);
-    forceKMapSync = false;
-
-    if (params.regionBinarize) {
-      setStatus(ui().status.processingRegion);
-    } else if (useGpu) {
-      setStatus(ui().status.processingGpu);
-    } else {
-      setStatus(ui().status.processingGeneric);
+    if (workerInFlight) {
+      queuedRenderPending = true;
+      queuedRenderForce = queuedRenderForce || force;
+      return;
     }
+
+    dispatchWorkerRender(force);
   }, delay);
 }
 
@@ -967,6 +1007,13 @@ function getRequired2DContext(canvas: HTMLCanvasElement, willReadFrequently: boo
   if (!ctx) throw new Error("Failed to create 2D canvas context.");
   return ctx;
 }
+
+
+
+
+
+
+
 
 
 
