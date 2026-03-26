@@ -408,7 +408,9 @@ function toggleLanguage(): void {
 }
 
 function updateBackendOptionTexts(): void {
-  for (const option of backendSelect.options) {
+  const options = backendSelect.options;
+  for (let i = 0; i < options.length; i += 1) {
+    const option = options[i];
     if (option.value === "auto") option.textContent = ui().backendAuto;
     if (option.value === "webgpu") option.textContent = ui().backendWebgpu;
     if (option.value === "webgl") option.textContent = ui().backendWebgl;

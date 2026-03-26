@@ -1,4 +1,4 @@
-﻿{
+{
   "scripts": {
     "build:ts": "tsc -p tsconfig.app.json && tsc -p tsconfig.worker.json",
     "sync:js": "node tools/sync-build.cjs",
@@ -6,6 +6,6 @@
     "typecheck": "npm run build:ts"
   },
   "devDependencies": {
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.3"
   }
 }
