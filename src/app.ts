@@ -13,7 +13,7 @@ import type {
   WorkerResultMessage,
 } from "./types.js";
 
-const APP_VERSION = "20260325-8";
+const APP_VERSION = "20260326-4";
 const MAX_IMAGE_DIM = 1024;
 const LOCALE_STORAGE_KEY = "lineextractor.locale";
 type Locale = "zh" | "en";
@@ -32,6 +32,7 @@ const DEFAULT_PARAMS: AppParams = {
   sharpen: 0.35,
   regionBinarize: false,
   embedSketchLines: false,
+  debugEmbedMask: false,
   regionTopPercent: 32,
   rankVoteWeight: 0.7,
   rankGrayWeight: 0.3,
@@ -93,6 +94,7 @@ const CONTROL_SCHEMA: ControlGroupDef[] = [
     controls: [
       { key: "regionBinarize", label: "Enable Region Binarization", type: "checkbox" },
       { key: "embedSketchLines", label: "Embed Sketch Lines", type: "checkbox" },
+      { key: "debugEmbedMask", label: "Debug Embed Mask", type: "checkbox" },
       { key: "regionTopPercent", label: "Top p% As Black", type: "range", min: 1, max: 99, step: 1 },
       { key: "rankVoteWeight", label: "Vote Score Weight", type: "range", min: 0, max: 1, step: 0.01 },
       { key: "rankGrayWeight", label: "Gray Rank Weight", type: "range", min: 0, max: 1, step: 0.01 },
@@ -140,6 +142,7 @@ const CONTROL_LABELS: Record<Locale, Partial<Record<ControlKey, string>>> = {
     sharpen: "锐化",
     regionBinarize: "启用区域二值化",
     embedSketchLines: "嵌入线稿纹理",
+    debugEmbedMask: "调试嵌入线掩码",
     regionTopPercent: "前 p% 设为黑",
     rankVoteWeight: "投票分数权重",
     rankGrayWeight: "灰度排名权重",
@@ -179,6 +182,7 @@ const UI_TEXT = {
     renderBackend: "渲染后端",
     source: "原图",
     output: "输出",
+    debug: "调试层",
     waiting: "等待加载图片...",
     switchLabel: "EN",
     backendAuto: "自动 (WebGPU > WebGL2 > CPU)",
@@ -218,6 +222,7 @@ const UI_TEXT = {
     renderBackend: "Render Backend",
     source: "Source",
     output: "Output",
+    debug: "Debug Layer",
     waiting: "Waiting for image...",
     switchLabel: "中文",
     backendAuto: "Auto (WebGPU > WebGL2 > CPU)",
@@ -261,11 +266,14 @@ const subtitleEl = getRequiredElement<HTMLElement>("app-subtitle");
 const importLabelEl = getRequiredElement<HTMLElement>("import-label");
 const sourceCaptionEl = getRequiredElement<HTMLElement>("source-caption");
 const outputCaptionEl = getRequiredElement<HTMLElement>("output-caption");
+const debugCaptionEl = getRequiredElement<HTMLElement>("debug-caption");
+const debugFigureEl = getRequiredElement<HTMLElement>("debug-figure");
 const backendLabelEl = getRequiredElement<HTMLElement>("backend-label");
 const langToggleButton = getRequiredElement<HTMLButtonElement>("lang-toggle");
 
 const sourceCanvas = getRequiredElement<HTMLCanvasElement>("source-canvas");
 const resultCanvas = getRequiredElement<HTMLCanvasElement>("result-canvas");
+const debugCanvas = getRequiredElement<HTMLCanvasElement>("debug-canvas");
 const controlsRoot = getRequiredElement<HTMLElement>("controls");
 const statusEl = getRequiredElement<HTMLElement>("status");
 const fileInput = getRequiredElement<HTMLInputElement>("file-input");
@@ -276,6 +284,8 @@ const backendSelect = getRequiredElement<HTMLSelectElement>("backend-select");
 
 const sourceCtx = getRequired2DContext(sourceCanvas, true);
 const resultCtx = getRequired2DContext(resultCanvas, false);
+const debugCtx = getRequired2DContext(debugCanvas, false);
+debugFigureEl.style.display = "none";
 
 const worker = new Worker(`./worker.js?v=${APP_VERSION}`, { type: "module" });
 const gpuRenderer = new HybridGpuRenderer();
@@ -287,6 +297,7 @@ const LAYER1_KEYS = new Set<ControlKey>(["radius", "filterType", "butterOrder", 
 const LAYER2_KEYS = new Set<ControlKey>();
 const REGION_DETAIL_KEYS = new Set<ControlKey>([
   "embedSketchLines",
+  "debugEmbedMask",
   "regionTopPercent",
   "rankVoteWeight",
   "rankGrayWeight",
@@ -377,6 +388,7 @@ function applyLocaleTexts(announce = true): void {
   backendLabelEl.textContent = ui().renderBackend;
   sourceCaptionEl.textContent = ui().source;
   outputCaptionEl.textContent = ui().output;
+  debugCaptionEl.textContent = ui().debug;
   langToggleButton.textContent = ui().switchLabel;
 
   updateBackendOptionTexts();
@@ -481,6 +493,12 @@ function handleWorkerResult(message: WorkerResultMessage): void {
     setStatus(ui().status.gpuOutputFallback);
     requestRender("", true);
     return;
+  }
+
+  if (message.debugImageBuffer) {
+    drawDebugResult(message.width, message.height, message.debugImageBuffer);
+  } else {
+    clearDebugLayer();
   }
 
   hasResult = true;
@@ -706,6 +724,8 @@ function resizeCanvases(width: number, height: number): void {
   sourceCanvas.height = height;
   resultCanvas.width = width;
   resultCanvas.height = height;
+  debugCanvas.width = width;
+  debugCanvas.height = height;
 }
 
 function initWorkerImage(): void {
@@ -721,6 +741,7 @@ function initWorkerImage(): void {
   queuedRenderPending = false;
   queuedRenderForce = false;
   gpuRenderer.resetKMap();
+  clearDebugLayer();
   setStatus(ui().status.initFrequency);
 
   const message: WorkerInitImageMessage = {
@@ -790,6 +811,7 @@ function requestRender(changedKey: ControlKey | "" = "", force = false): void {
     if (canLocalGpu) {
       const gpuMs = gpuRenderer.render(params);
       drawFromGpuCanvas(sourceCanvas.width, sourceCanvas.height);
+      clearDebugLayer();
       hasResult = true;
       setStatus(`${ui().status.localGpuDone} | Layer3 | ${gpuMs.toFixed(1)}ms`);
       return;
@@ -826,6 +848,20 @@ function drawFromGpuCanvas(width: number, height: number): void {
   }
   resultCtx.clearRect(0, 0, width, height);
   resultCtx.drawImage(gpuRenderer.canvas, 0, 0, width, height);
+}
+
+function drawDebugResult(width: number, height: number, buffer: ArrayBuffer): void {
+  if (debugCanvas.width !== width || debugCanvas.height !== height) {
+    resizeCanvases(width, height);
+  }
+  const imageData = new ImageData(new Uint8ClampedArray(buffer), width, height);
+  debugCtx.putImageData(imageData, 0, 0);
+  debugFigureEl.style.display = "block";
+}
+
+function clearDebugLayer(): void {
+  debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+  debugFigureEl.style.display = "none";
 }
 
 function exportPng(): void {
@@ -1011,33 +1047,4 @@ function getRequired2DContext(canvas: HTMLCanvasElement, willReadFrequently: boo
   if (!ctx) throw new Error("Failed to create 2D canvas context.");
   return ctx;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

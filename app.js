@@ -1,5 +1,5 @@
 import { HybridGpuRenderer } from "./gpu_renderer.js";
-const APP_VERSION = "20260325-8";
+const APP_VERSION = "20260326-4";
 const MAX_IMAGE_DIM = 1024;
 const LOCALE_STORAGE_KEY = "lineextractor.locale";
 const DEFAULT_PARAMS = {
@@ -16,6 +16,7 @@ const DEFAULT_PARAMS = {
     sharpen: 0.35,
     regionBinarize: false,
     embedSketchLines: false,
+    debugEmbedMask: false,
     regionTopPercent: 32,
     rankVoteWeight: 0.7,
     rankGrayWeight: 0.3,
@@ -76,6 +77,7 @@ const CONTROL_SCHEMA = [
         controls: [
             { key: "regionBinarize", label: "Enable Region Binarization", type: "checkbox" },
             { key: "embedSketchLines", label: "Embed Sketch Lines", type: "checkbox" },
+            { key: "debugEmbedMask", label: "Debug Embed Mask", type: "checkbox" },
             { key: "regionTopPercent", label: "Top p% As Black", type: "range", min: 1, max: 99, step: 1 },
             { key: "rankVoteWeight", label: "Vote Score Weight", type: "range", min: 0, max: 1, step: 0.01 },
             { key: "rankGrayWeight", label: "Gray Rank Weight", type: "range", min: 0, max: 1, step: 0.01 },
@@ -120,6 +122,7 @@ const CONTROL_LABELS = {
         sharpen: "锐化",
         regionBinarize: "启用区域二值化",
         embedSketchLines: "嵌入线稿纹理",
+        debugEmbedMask: "调试嵌入线掩码",
         regionTopPercent: "前 p% 设为黑",
         rankVoteWeight: "投票分数权重",
         rankGrayWeight: "灰度排名权重",
@@ -158,6 +161,7 @@ const UI_TEXT = {
         renderBackend: "渲染后端",
         source: "原图",
         output: "输出",
+        debug: "调试层",
         waiting: "等待加载图片...",
         switchLabel: "EN",
         backendAuto: "自动 (WebGPU > WebGL2 > CPU)",
@@ -197,6 +201,7 @@ const UI_TEXT = {
         renderBackend: "Render Backend",
         source: "Source",
         output: "Output",
+        debug: "Debug Layer",
         waiting: "Waiting for image...",
         switchLabel: "中文",
         backendAuto: "Auto (WebGPU > WebGL2 > CPU)",
@@ -232,10 +237,13 @@ const subtitleEl = getRequiredElement("app-subtitle");
 const importLabelEl = getRequiredElement("import-label");
 const sourceCaptionEl = getRequiredElement("source-caption");
 const outputCaptionEl = getRequiredElement("output-caption");
+const debugCaptionEl = getRequiredElement("debug-caption");
+const debugFigureEl = getRequiredElement("debug-figure");
 const backendLabelEl = getRequiredElement("backend-label");
 const langToggleButton = getRequiredElement("lang-toggle");
 const sourceCanvas = getRequiredElement("source-canvas");
 const resultCanvas = getRequiredElement("result-canvas");
+const debugCanvas = getRequiredElement("debug-canvas");
 const controlsRoot = getRequiredElement("controls");
 const statusEl = getRequiredElement("status");
 const fileInput = getRequiredElement("file-input");
@@ -245,6 +253,8 @@ const resetButton = getRequiredElement("reset-params");
 const backendSelect = getRequiredElement("backend-select");
 const sourceCtx = getRequired2DContext(sourceCanvas, true);
 const resultCtx = getRequired2DContext(resultCanvas, false);
+const debugCtx = getRequired2DContext(debugCanvas, false);
+debugFigureEl.style.display = "none";
 const worker = new Worker(`./worker.js?v=${APP_VERSION}`, { type: "module" });
 const gpuRenderer = new HybridGpuRenderer();
 const params = { ...DEFAULT_PARAMS };
@@ -253,6 +263,7 @@ const LAYER1_KEYS = new Set(["radius", "filterType", "butterOrder", "highpassStr
 const LAYER2_KEYS = new Set();
 const REGION_DETAIL_KEYS = new Set([
     "embedSketchLines",
+    "debugEmbedMask",
     "regionTopPercent",
     "rankVoteWeight",
     "rankGrayWeight",
@@ -333,6 +344,7 @@ function applyLocaleTexts(announce = true) {
     backendLabelEl.textContent = ui().renderBackend;
     sourceCaptionEl.textContent = ui().source;
     outputCaptionEl.textContent = ui().output;
+    debugCaptionEl.textContent = ui().debug;
     langToggleButton.textContent = ui().switchLabel;
     updateBackendOptionTexts();
     if (!isImageReady && !hasResult) {
@@ -427,6 +439,12 @@ function handleWorkerResult(message) {
         setStatus(ui().status.gpuOutputFallback);
         requestRender("", true);
         return;
+    }
+    if (message.debugImageBuffer) {
+        drawDebugResult(message.width, message.height, message.debugImageBuffer);
+    }
+    else {
+        clearDebugLayer();
     }
     hasResult = true;
     const layers = [];
@@ -616,6 +634,8 @@ function resizeCanvases(width, height) {
     sourceCanvas.height = height;
     resultCanvas.width = width;
     resultCanvas.height = height;
+    debugCanvas.width = width;
+    debugCanvas.height = height;
 }
 function initWorkerImage() {
     const width = sourceCanvas.width;
@@ -629,6 +649,7 @@ function initWorkerImage() {
     queuedRenderPending = false;
     queuedRenderForce = false;
     gpuRenderer.resetKMap();
+    clearDebugLayer();
     setStatus(ui().status.initFrequency);
     const message = {
         type: "initImage",
@@ -692,6 +713,7 @@ function requestRender(changedKey = "", force = false) {
         if (canLocalGpu) {
             const gpuMs = gpuRenderer.render(params);
             drawFromGpuCanvas(sourceCanvas.width, sourceCanvas.height);
+            clearDebugLayer();
             hasResult = true;
             setStatus(`${ui().status.localGpuDone} | Layer3 | ${gpuMs.toFixed(1)}ms`);
             return;
@@ -726,6 +748,18 @@ function drawFromGpuCanvas(width, height) {
     }
     resultCtx.clearRect(0, 0, width, height);
     resultCtx.drawImage(gpuRenderer.canvas, 0, 0, width, height);
+}
+function drawDebugResult(width, height, buffer) {
+    if (debugCanvas.width !== width || debugCanvas.height !== height) {
+        resizeCanvases(width, height);
+    }
+    const imageData = new ImageData(new Uint8ClampedArray(buffer), width, height);
+    debugCtx.putImageData(imageData, 0, 0);
+    debugFigureEl.style.display = "block";
+}
+function clearDebugLayer() {
+    debugCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+    debugFigureEl.style.display = "none";
 }
 function exportPng() {
     if (!hasResult) {

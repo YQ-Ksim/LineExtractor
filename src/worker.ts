@@ -235,6 +235,7 @@ function processFrame(id: number, rawParams: Partial<AppParams>, options: Proces
   let fusionMs = 0;
   let crfMs = 0;
   let regionCacheHit = false;
+  let debugOutput: Uint8ClampedArray | null = null;
   let recomputeLayer1 = false;
   let recomputeLayer2 = false;
 
@@ -277,6 +278,7 @@ function processFrame(id: number, rawParams: Partial<AppParams>, options: Proces
       fusionMs = regionResult.fusionMs || 0;
       crfMs = regionResult.crfMs || 0;
       regionCacheHit = Boolean(regionResult.cacheHit);
+      debugOutput = regionResult.debugImage || null;
       regionMs = performance.now() - r;
     } else {
       output = grayscaleToRgba(tone);
@@ -294,6 +296,7 @@ function processFrame(id: number, rawParams: Partial<AppParams>, options: Proces
   const transfer = [];
   if (output) transfer.push(output.buffer);
   if (kMapBuffer) transfer.push(kMapBuffer);
+  if (debugOutput) transfer.push(debugOutput.buffer);
 
   self.postMessage(
     {
@@ -303,6 +306,7 @@ function processFrame(id: number, rawParams: Partial<AppParams>, options: Proces
       height: state.height,
       imageBuffer: output ? output.buffer : null,
       kMapBuffer,
+      debugImageBuffer: debugOutput ? debugOutput.buffer : null,
       kRange: state.kRange,
       kVersion: state.kVersion,
       stats: {
@@ -345,6 +349,7 @@ function sanitizeParams(params: Partial<AppParams>): AppParams {
     sharpen: clampNumber(params.sharpen, 0, 10, 0.35),
     regionBinarize: Boolean(params.regionBinarize),
     embedSketchLines: params.embedSketchLines === undefined ? false : Boolean(params.embedSketchLines),
+    debugEmbedMask: params.debugEmbedMask === undefined ? false : Boolean(params.debugEmbedMask),
     regionTopPercent: clampNumber(params.regionTopPercent, 1, 99, 32),
     rankVoteWeight: clampNumber(params.rankVoteWeight, 0, 5, 0.7),
     rankGrayWeight: clampNumber(params.rankGrayWeight, 0, 5, 0.3),
@@ -553,6 +558,7 @@ function lineGuidedRegionBinarize(tone, params, toneKey) {
       fusionMs: cache.stats.fusionMs,
       crfMs: 0,
       cacheHit,
+      debugImage: null,
     };
   }
 
@@ -594,8 +600,19 @@ function lineGuidedRegionBinarize(tone, params, toneKey) {
     out[base + 3] = 255;
   }
 
-  if (params.embedSketchLines) {
-    applyAdaptiveLineTextureToOutput(out, seg.lineMask, barrier, seg.crfA, width, height);
+  let debugImage = null;
+  if (params.embedSketchLines || params.debugEmbedMask) {
+    debugImage = applyAdaptiveLineTextureFromTone(
+      out,
+      tone,
+      seg.crfA,
+      width,
+      height,
+      params.segLineThreshold,
+      params.segLineMinArea,
+      params.embedSketchLines,
+      params.debugEmbedMask
+    );
   }
 
   return {
@@ -609,21 +626,88 @@ function lineGuidedRegionBinarize(tone, params, toneKey) {
     fusionMs: cache.stats.fusionMs,
     crfMs,
     cacheHit,
+    debugImage,
   };
 }
 
-function applyAdaptiveLineTextureToOutput(out, lineMask, barrier, binaryMask, width, height) {
+function applyAdaptiveLineTextureFromTone(
+  out,
+  tone,
+  binaryMask,
+  width,
+  height,
+  lineThreshold,
+  minLineAreaParam,
+  enableEmbed,
+  debugMode
+) {
   const n = width * height;
-  let globalBlack = 0;
-  let globalWhite = 0;
+  const rawMask = new Uint8Array(n);
+  const lineMask = new Uint8Array(n);
+  const debugImage = debugMode ? new Uint8ClampedArray(n * 4) : null;
+
+  let maxTone = 0;
+  for (let i = 0; i < n; i += 1) {
+    const v = tone[i];
+    if (v > maxTone) maxTone = v;
+  }
+
+  // Keep threshold conservative to retain original line thickness, avoid forced thickening.
+  const baseThreshold = clampNumber(lineThreshold, 0.03, 0.95, 0.55);
+  const adaptiveThreshold = clampNumber(maxTone * 0.72, 0.03, 0.95, 0.4);
+  const embedThreshold = Math.min(baseThreshold, adaptiveThreshold);
 
   for (let i = 0; i < n; i += 1) {
-    const isLine = barrier[i] || lineMask[i];
-    if (isLine) continue;
+    rawMask[i] = tone[i] >= embedThreshold ? 1 : 0;
+    lineMask[i] = rawMask[i];
+  }
 
-    const isBlack = !barrier[i] && binaryMask[i] >= 0.5;
-    if (isBlack) globalBlack += 1;
+  // Remove tiny isolated fragments so tiny spots are not embedded.
+  const minLineArea = Math.max(2, Math.round(minLineAreaParam));
+  removeSmallBinaryComponents(lineMask, width, height, minLineArea, state.seg.queue, state.seg.visited);
+
+  let lineCount = 0;
+  for (let i = 0; i < n; i += 1) {
+    if (lineMask[i]) lineCount += 1;
+  }
+
+  if (lineCount < Math.max(8, (n * 0.0005) | 0)) {
+    // Fallback keeps lines thin: pick only very bright K responses, then remove tiny islands.
+    const fallbackThreshold = Math.max(embedThreshold, maxTone * 0.82);
+    for (let i = 0; i < n; i += 1) {
+      lineMask[i] = tone[i] >= fallbackThreshold ? 1 : 0;
+    }
+    removeSmallBinaryComponents(lineMask, width, height, minLineArea, state.seg.queue, state.seg.visited);
+  }
+
+  let globalBlack = 0;
+  let globalWhite = 0;
+  for (let i = 0; i < n; i += 1) {
+    if (lineMask[i]) continue;
+    if (binaryMask[i] >= 0.5) globalBlack += 1;
     else globalWhite += 1;
+  }
+
+  if (debugImage) {
+    for (let i = 0; i < n; i += 1) {
+      const base = i * 4;
+      const c = binaryMask[i] >= 0.5 ? 36 : 226;
+      debugImage[base] = c;
+      debugImage[base + 1] = c;
+      debugImage[base + 2] = c;
+      debugImage[base + 3] = 255;
+
+      if (rawMask[i]) {
+        debugImage[base] = 244;
+        debugImage[base + 1] = 196;
+        debugImage[base + 2] = 86;
+      }
+      if (lineMask[i]) {
+        debugImage[base] = 120;
+        debugImage[base + 1] = 255;
+        debugImage[base + 2] = 140;
+      }
+    }
   }
 
   const preferBlackLine = globalWhite >= globalBlack;
@@ -633,8 +717,7 @@ function applyAdaptiveLineTextureToOutput(out, lineMask, barrier, binaryMask, wi
     const row = y * width;
     for (let x = 0; x < width; x += 1) {
       const idx = row + x;
-      const isLine = barrier[idx] || lineMask[idx];
-      if (!isLine) continue;
+      if (!lineMask[idx]) continue;
 
       let blackCount = 0;
       let whiteCount = 0;
@@ -642,41 +725,47 @@ function applyAdaptiveLineTextureToOutput(out, lineMask, barrier, binaryMask, wi
       for (let oy = -radius; oy <= radius; oy += 1) {
         const ny = y + oy;
         if (ny < 0 || ny >= height) continue;
-
         for (let ox = -radius; ox <= radius; ox += 1) {
           if (ox === 0 && oy === 0) continue;
           const nx = x + ox;
           if (nx < 0 || nx >= width) continue;
-
           const nb = ny * width + nx;
-          const nbIsLine = barrier[nb] || lineMask[nb];
-          if (nbIsLine) continue;
-
-          const isBlack = !barrier[nb] && binaryMask[nb] >= 0.5;
-          if (isBlack) blackCount += 1;
+          if (lineMask[nb]) continue;
+          if (binaryMask[nb] >= 0.5) blackCount += 1;
           else whiteCount += 1;
         }
       }
 
       let lineIsBlack;
-      if (blackCount > whiteCount) {
-        // Near black-dominant area: render white line for contrast.
-        lineIsBlack = false;
-      } else if (whiteCount > blackCount) {
-        // Near white-dominant area: render black line for contrast.
-        lineIsBlack = true;
-      } else {
-        lineIsBlack = preferBlackLine;
+      if (blackCount > whiteCount) lineIsBlack = false;
+      else if (whiteCount > blackCount) lineIsBlack = true;
+      else lineIsBlack = preferBlackLine;
+
+      if (enableEmbed) {
+        const c = lineIsBlack ? 0 : 255;
+        const base = idx * 4;
+        out[base] = c;
+        out[base + 1] = c;
+        out[base + 2] = c;
+        out[base + 3] = 255;
       }
 
-      const c = lineIsBlack ? 0 : 255;
-      const base = idx * 4;
-      out[base] = c;
-      out[base + 1] = c;
-      out[base + 2] = c;
-      out[base + 3] = 255;
+      if (debugImage) {
+        const base = idx * 4;
+        if (lineIsBlack) {
+          debugImage[base] = 255;
+          debugImage[base + 1] = 72;
+          debugImage[base + 2] = 72;
+        } else {
+          debugImage[base] = 68;
+          debugImage[base + 1] = 168;
+          debugImage[base + 2] = 255;
+        }
+      }
     }
   }
+
+  return debugImage;
 }
 
 function buildRegionStructureKey(toneKey, params) {
@@ -2294,18 +2383,6 @@ function clampNumber(value, lo, hi, fallback) {
   if (n > hi) return hi;
   return n;
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg-0: #f4f8f5;
   --bg-1: #e9f2ec;
   --ink-0: #1f2933;
@@ -245,7 +245,7 @@ body {
 
 .canvas-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
 }
 
@@ -305,3 +305,4 @@ canvas {
     grid-template-columns: 1fr;
   }
 }
+

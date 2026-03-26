@@ -16,6 +16,7 @@ export interface AppParams {
   sharpen: number;
   regionBinarize: boolean;
   embedSketchLines: boolean;
+  debugEmbedMask: boolean;
   regionTopPercent: number;
   rankVoteWeight: number;
   rankGrayWeight: number;
@@ -108,6 +109,7 @@ export interface WorkerResultMessage {
   height: number;
   imageBuffer: ArrayBuffer | null;
   kMapBuffer: ArrayBuffer | null;
+  debugImageBuffer?: ArrayBuffer | null;
   kRange: KRange;
   kVersion: number;
   stats: WorkerResultStats;
@@ -157,4 +159,5 @@ export interface GpuInitResult {
   backend: BackendKind;
   reason: string;
 }
+
 
